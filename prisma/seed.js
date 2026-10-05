@@ -3,21 +3,28 @@ import bcrypt from 'bcrypt'
 
 const prisma = new PrismaClient()
 
+// Owner account used for the demo patient and the platform admin.
+const OWNER_EMAIL = 'kilunda007@gmail.com'
+
+// Demo professional uses a non-deliverable address, like the other seed
+// accounts, so it never clashes with a real professional signup.
+const DEMO_PROFESSIONAL_EMAIL = 'dr.sarah@mindora.local'
+
 async function main() {
   const passwordHash = await bcrypt.hash('demo-password', 12)
 
   const user = await prisma.user.upsert({
-    where: { email: 'kilwanda.josh@roadrimz.com' },
+    where: { email: OWNER_EMAIL },
     update: {},
-    create: { fullName: 'Joshua Otieno', email: 'kilwanda.josh@roadrimz.com', passwordHash },
+    create: { fullName: 'Joshua Otieno', email: OWNER_EMAIL, passwordHash },
   })
 
   const professional = await prisma.professional.upsert({
-    where: { email: 'kilwanda.josh@roadrimz.com' },
+    where: { email: DEMO_PROFESSIONAL_EMAIL },
     update: { verified: true },
     create: {
       fullName: 'Dr. Sarah Mwangi',
-      email: 'kilwanda.josh@roadrimz.com',
+      email: DEMO_PROFESSIONAL_EMAIL,
       passwordHash,
       type: 'CLINICAL_PSYCHOLOGIST',
       bio: 'Clinical psychologist with 9 years of experience supporting young adults through anxiety, depression, and major life transitions.',
@@ -34,11 +41,11 @@ async function main() {
   })
 
   const platformAdmin = await prisma.admin.upsert({
-    where: { email: 'kilwanda.josh@roadrimz.com' },
+    where: { email: OWNER_EMAIL },
     update: { role: 'PLATFORM_ADMIN' },
     create: {
       fullName: 'Mindora Platform Team',
-      email: 'kilwanda.josh@roadrimz.com',
+      email: OWNER_EMAIL,
       passwordHash,
       role: 'PLATFORM_ADMIN',
     },
