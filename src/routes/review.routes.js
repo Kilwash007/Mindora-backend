@@ -6,6 +6,20 @@ import { audit } from '../lib/audit.js'
 
 export const reviewRouter = Router()
 
+// Patient ratings of professionals are switched OFF by default, following
+// clinical feedback that public star ratings are not a good measure of
+// mental-health care quality. Existing reviews stay in the database and the
+// feature can be restored by setting REVIEWS_ENABLED=true in the environment.
+function reviewsEnabled() {
+  return process.env.REVIEWS_ENABLED === 'true'
+}
+
+// Lets the frontend ask whether reviews are on, so it can hide the review
+// form and star ratings automatically without a separate frontend setting.
+reviewRouter.get('/status', requireAuth, (_req, res) => {
+  res.json({ enabled: reviewsEnabled() })
+})
+
 const createReviewSchema = z.object({
   appointmentId: z.string().uuid(),
   rating: z.number().int().min(1).max(5),
@@ -17,6 +31,10 @@ const createReviewSchema = z.object({
 // explicit check below (the unique constraint is the real guarantee; the
 // check gives a clear error message instead of a raw DB error).
 reviewRouter.post('/', requireAuth, requireRole('user'), async (req, res) => {
+  if (!reviewsEnabled()) {
+    return res.status(403).json({ error: 'Reviews are currently turned off.' })
+  }
+
   const parsed = createReviewSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
@@ -55,10 +73,13 @@ reviewRouter.post('/', requireAuth, requireRole('user'), async (req, res) => {
 })
 
 // Public-facing reviews for a professional — deliberately never includes
-// who wrote them, only the rating, comment, and date. This is what lets a
-// review live on a public directory profile without disclosing that a
-// specific named person sought mental-health care.
+// who wrote them, only the rating, comment, and date. When reviews are
+// switched off, this returns an empty result so no ratings are shown.
 reviewRouter.get('/professional/:professionalId', requireAuth, async (req, res) => {
+  if (!reviewsEnabled()) {
+    return res.json({ reviews: [], average: null, count: 0, enabled: false })
+  }
+
   const reviews = await prisma.review.findMany({
     where: { professionalId: req.params.professionalId },
     select: { id: true, rating: true, comment: true, createdAt: true },
@@ -68,7 +89,7 @@ reviewRouter.get('/professional/:professionalId', requireAuth, async (req, res) 
   const average =
     reviews.length > 0 ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length : null
 
-  res.json({ reviews, average, count: reviews.length })
+  res.json({ reviews, average, count: reviews.length, enabled: true })
 })
 
 // A patient's own review for one appointment, if they left one — used to
