@@ -519,8 +519,8 @@ model Payment {
 // a professional (bank transfer, M-Pesa send, etc. — outside the app for
 // now, per the founder's choice to avoid per-session B2C disbursement
 // fees). Appointments get linked to a Payout once included in one; an
-// appointment with payoutId = null and a PAID payment is "owed, not yet
-// settled" — that's the whole ledger logic.
+// appointment with payoutId = null that is either PAID by the patient or
+// fully covered by an institution is "owed, not yet settled".
 // ---------------------------------------------------------------------------
 
 model Payout {
@@ -587,20 +587,27 @@ model SafetyAlert {
 
 // ---------------------------------------------------------------------------
 // Institutional partners
+//
+// memberLimit caps how many people can link with the enrollment code (for
+// example, 50 places in a university pilot). sponsoredSessionsPerMember
+// caps how many sessions the institution covers for each member (for
+// example, 2 free sessions). Both are optional: null means unlimited.
 // ---------------------------------------------------------------------------
 
 model Institution {
-  id                     String             @id @default(uuid())
-  name                   String
-  type                   InstitutionType
-  contactName            String?
-  contactEmail           String?
-  status                 InstitutionStatus  @default(PENDING)
-  notes                  String?
-  coveragePercent        Int                @default(0)
-  enrollmentCode         String             @unique
-  createdAt              DateTime           @default(now())
-  updatedAt              DateTime           @updatedAt
+  id                         String             @id @default(uuid())
+  name                       String
+  type                       InstitutionType
+  contactName                String?
+  contactEmail               String?
+  status                     InstitutionStatus  @default(PENDING)
+  notes                      String?
+  coveragePercent            Int                @default(0)
+  enrollmentCode             String             @unique
+  memberLimit                Int?
+  sponsoredSessionsPerMember Int?
+  createdAt                  DateTime           @default(now())
+  updatedAt                  DateTime           @updatedAt
 
   members                User[]
   sponsoredAppointments  Appointment[]

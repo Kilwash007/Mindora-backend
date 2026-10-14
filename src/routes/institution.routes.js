@@ -14,6 +14,9 @@ function generateEnrollmentCode() {
   return crypto.randomBytes(4).toString('hex').toUpperCase() // e.g. "A1B2C3D4"
 }
 
+// Pilot limits: null (or omitted) means unlimited.
+const limitField = z.number().int().min(1).nullable().optional()
+
 const createSchema = z.object({
   name: z.string().min(1),
   type: z.enum(['EMPLOYER', 'UNIVERSITY', 'HEALTHCARE_PROVIDER', 'INSURER', 'OTHER']),
@@ -21,6 +24,8 @@ const createSchema = z.object({
   contactEmail: z.string().email().optional(),
   notes: z.string().optional(),
   coveragePercent: z.number().int().min(0).max(100).optional(),
+  memberLimit: limitField,
+  sponsoredSessionsPerMember: limitField,
 })
 
 institutionRouter.get('/', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
@@ -63,6 +68,8 @@ const updateSchema = z.object({
   status: z.enum(['PENDING', 'ACTIVE', 'INACTIVE']).optional(),
   notes: z.string().optional(),
   coveragePercent: z.number().int().min(0).max(100).optional(),
+  memberLimit: limitField,
+  sponsoredSessionsPerMember: limitField,
 })
 
 institutionRouter.patch('/:id', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
@@ -83,6 +90,7 @@ institutionRouter.patch('/:id', requireAuth, requireAdminRole('PLATFORM_ADMIN'),
     action: 'institution.update',
     resourceType: 'institution',
     resourceId: institution.id,
+    metadata: parsed.data,
   })
 
   res.json(updated)
@@ -90,7 +98,7 @@ institutionRouter.patch('/:id', requireAuth, requireAdminRole('PLATFORM_ADMIN'),
 
 // Aggregate usage stats only — deliberately never returns which specific
 // patients are linked, matching how real Employee Assistance Programs
-// guarantee anonymity to covered employees. An employer sees counts and
+// guarantee anonymity to covered employees. An institution sees counts and
 // totals for billing purposes, never a list of who used the benefit.
 institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
   const institution = await prisma.institution.findUnique({ where: { id: req.params.id } })
@@ -98,9 +106,11 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
 
   const [memberCount, sponsoredAppointmentCount, coverageSum] = await Promise.all([
     prisma.user.count({ where: { institutionId: institution.id } }),
-    prisma.appointment.count({ where: { sponsoringInstitutionId: institution.id } }),
+    prisma.appointment.count({
+      where: { sponsoringInstitutionId: institution.id, status: { not: 'CANCELLED' } },
+    }),
     prisma.appointment.aggregate({
-      where: { sponsoringInstitutionId: institution.id },
+      where: { sponsoringInstitutionId: institution.id, status: { not: 'CANCELLED' } },
       _sum: { institutionCoveredKes: true },
     }),
   ])
@@ -115,6 +125,10 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
 
   res.json({
     memberCount,
+    memberLimit: institution.memberLimit,
+    placesRemaining:
+      institution.memberLimit == null ? null : Math.max(0, institution.memberLimit - memberCount),
+    sponsoredSessionsPerMember: institution.sponsoredSessionsPerMember,
     sponsoredAppointmentCount,
     totalCoveredKes: coverageSum._sum.institutionCoveredKes ?? 0,
   })

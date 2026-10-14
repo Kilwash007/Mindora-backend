@@ -60,44 +60,60 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
   }
 
   const user = await prisma.user.findUnique({ where: { id: req.auth.id }, include: { institution: true } })
+  const institution = user?.institution
+
+  // Sponsorship applies only when the patient's institution is ACTIVE, has
+  // coverage, and — if it sets sponsoredSessionsPerMember (for example, 2
+  // free pilot sessions) — the patient hasn't used them all yet. Cancelled
+  // sessions don't count against the limit; completed and no-show ones do.
+  let sponsorshipAvailable = false
+  if (institution && institution.status === 'ACTIVE' && institution.coveragePercent > 0) {
+    if (institution.sponsoredSessionsPerMember == null) {
+      sponsorshipAvailable = true
+    } else {
+      const used = await prisma.appointment.count({
+        where: {
+          userId: req.auth.id,
+          sponsoringInstitutionId: institution.id,
+          status: { not: 'CANCELLED' },
+        },
+      })
+      sponsorshipAvailable = used < institution.sponsoredSessionsPerMember
+    }
+  }
 
   // Student Rate takes priority over a listed full fee, but defers to an
-  // active institution sponsorship (employer/university coverage) if one
-  // exists — that's a stronger, separately-negotiated benefit, and
-  // stacking both would be confusing to reconcile. A patient who's both
-  // Student Rate-eligible and institution-sponsored simply uses whichever
-  // benefit the institution coverage branch below applies.
-  const hasActiveSponsorship =
-    user?.institution && user.institution.status === 'ACTIVE' && user.institution.coveragePercent > 0
+  // available institution sponsorship — stacking both would be confusing to
+  // reconcile. Once a member's sponsored sessions are used up, they fall
+  // back to the Student Rate (if verified) or the standard fee.
   const useStudentRate =
-    !hasActiveSponsorship && user?.studentRateEligible && professional.studentRateFeeKes != null
+    !sponsorshipAvailable && user?.studentRateEligible && professional.studentRateFeeKes != null
 
-  const fullFee = useStudentRate ? professional.studentRateFeeKes : professional.feeKes ?? 0
+  // For university sponsorships, the professional's Student Rate fee is used
+  // when they have one — this keeps sponsored student sessions (such as a
+  // Mindora-funded pilot) at the agreed student rate rather than the
+  // professional's standard fee.
+  let fullFee
+  if (sponsorshipAvailable && institution.type === 'UNIVERSITY' && professional.studentRateFeeKes != null) {
+    fullFee = professional.studentRateFeeKes
+  } else if (useStudentRate) {
+    fullFee = professional.studentRateFeeKes
+  } else {
+    fullFee = professional.feeKes ?? 0
+  }
 
-  // If the patient is linked to an ACTIVE institution, that institution
-  // covers coveragePercent% of the fee (capped at the full fee) — this is
-  // the corporate EAP / employer-sponsored mechanism, separate from the
-  // Student Rate tier above. institutionType is only set when real
-  // sponsorship is actually happening (below), not merely because the
-  // patient has *a* linked institution — an inactive link or 0% coverage
-  // is a standard self-pay booking in every respect that matters for
-  // pricing.
   let sponsoringInstitutionId = null
   let institutionCoveredKes = 0
   let institutionType = null
 
-  if (hasActiveSponsorship) {
-    sponsoringInstitutionId = user.institution.id
-    institutionType = user.institution.type
-    institutionCoveredKes = Math.min(
-      fullFee,
-      Math.round((fullFee * user.institution.coveragePercent) / 100)
-    )
+  if (sponsorshipAvailable) {
+    sponsoringInstitutionId = institution.id
+    institutionType = institution.type
+    institutionCoveredKes = Math.min(fullFee, Math.round((fullFee * institution.coveragePercent) / 100))
   }
 
   // Platform commission: 35% standard, 25% on a Student Rate booking,
-  // 0% on corporate/EAP bookings (Mindora earns those through a separate
-  // employer retainer instead). See src/lib/pricing.js.
+  // and the institution rate on sponsored bookings. See src/lib/pricing.js.
   const platformFeeKes = calculatePlatformFeeKes(fullFee, institutionType, useStudentRate)
 
   const appointment = await prisma.appointment.create({

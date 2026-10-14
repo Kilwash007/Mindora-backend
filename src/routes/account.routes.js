@@ -117,34 +117,52 @@ const enrollSchema = z.object({ enrollmentCode: z.string().min(1) })
 // A patient links their own account to a sponsoring institution using a
 // code the institution shares with them — self-service, no admin approval
 // needed per-enrollment (the institution's own ACTIVE status is the gate).
+// If the institution has a memberLimit (for example, 50 pilot places), new
+// links are refused once it is reached; people already linked are unaffected.
 accountRouter.post('/enroll', requireAuth, requireRole('user'), async (req, res) => {
   const parsed = enrollSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
   const institution = await prisma.institution.findUnique({
-    where: { enrollmentCode: parsed.data.enrollmentCode.toUpperCase() },
+    where: { enrollmentCode: parsed.data.enrollmentCode.trim().toUpperCase() },
   })
 
   if (!institution || institution.status !== 'ACTIVE') {
     return res.status(404).json({ error: 'Invalid or inactive enrollment code.' })
   }
 
-  await prisma.user.update({ where: { id: req.auth.id }, data: { institutionId: institution.id } })
+  const user = await prisma.user.findUnique({ where: { id: req.auth.id }, select: { institutionId: true } })
+  const alreadyLinked = user?.institutionId === institution.id
 
-  await audit({
-    actorType: 'user',
-    actorId: req.auth.id,
-    action: 'account.institution_enroll',
-    resourceType: 'institution',
-    resourceId: institution.id,
-  })
+  if (!alreadyLinked && institution.memberLimit != null) {
+    const memberCount = await prisma.user.count({ where: { institutionId: institution.id } })
+    if (memberCount >= institution.memberLimit) {
+      return res.status(409).json({
+        error:
+          "All the free places in this programme have been taken. You can still complete free wellbeing check-ins and book sessions at your usual rate.",
+      })
+    }
+  }
+
+  if (!alreadyLinked) {
+    await prisma.user.update({ where: { id: req.auth.id }, data: { institutionId: institution.id } })
+
+    await audit({
+      actorType: 'user',
+      actorId: req.auth.id,
+      action: 'account.institution_enroll',
+      resourceType: 'institution',
+      resourceId: institution.id,
+    })
+  }
 
   res.json({ name: institution.name, type: institution.type, coveragePercent: institution.coveragePercent })
 })
 
 // What the patient sees about their own linked institution — never the
 // enrollment code itself (that's for re-sharing by the institution, not
-// re-display to an already-linked member).
+// re-display to an already-linked member). Includes how many of their
+// sponsored sessions they have used, when the institution sets a limit.
 accountRouter.get('/institution', requireAuth, requireRole('user'), async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.auth.id },
@@ -153,10 +171,20 @@ accountRouter.get('/institution', requireAuth, requireRole('user'), async (req, 
 
   if (!user?.institution) return res.json(null)
 
+  const sponsoredSessionsUsed = await prisma.appointment.count({
+    where: {
+      userId: req.auth.id,
+      sponsoringInstitutionId: user.institution.id,
+      status: { not: 'CANCELLED' },
+    },
+  })
+
   res.json({
     name: user.institution.name,
     type: user.institution.type,
     coveragePercent: user.institution.coveragePercent,
     status: user.institution.status,
+    sponsoredSessionsPerMember: user.institution.sponsoredSessionsPerMember,
+    sponsoredSessionsUsed,
   })
 })

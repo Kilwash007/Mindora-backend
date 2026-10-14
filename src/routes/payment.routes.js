@@ -9,6 +9,23 @@ export const paymentRouter = Router()
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
+// A completed appointment is owed to the professional (once not yet in a
+// payout) when either the patient's M-Pesa payment is PAID, or an
+// institution covered the whole fee so the patient never needed to pay —
+// for example, free sessions in a Mindora-funded university pilot.
+function isSettleable(appt) {
+  if (appt.payment?.status === 'PAID') return true
+  return !appt.payment && appt.sponsoringInstitutionId != null && appt.institutionCoveredKes >= appt.feeKes
+}
+
+async function findOwedAppointments(where = {}) {
+  const candidates = await prisma.appointment.findMany({
+    where: { ...where, payoutId: null, status: 'COMPLETED' },
+    include: { payment: true, professional: { select: { id: true, fullName: true } } },
+  })
+  return candidates.filter(isSettleable)
+}
+
 // ---------------------------------------------------------------------------
 // Patient: start a payment for one of their own appointments
 // ---------------------------------------------------------------------------
@@ -192,14 +209,7 @@ paymentRouter.post('/callback', wrap(async (req, res) => {
 // ---------------------------------------------------------------------------
 
 paymentRouter.get('/ledger', requireAuth, requireAdminRole('PLATFORM_ADMIN'), wrap(async (req, res) => {
-  const owedAppointments = await prisma.appointment.findMany({
-    where: {
-      payoutId: null,
-      status: 'COMPLETED',
-      payment: { status: 'PAID' },
-    },
-    include: { professional: { select: { id: true, fullName: true } } },
-  })
+  const owedAppointments = await findOwedAppointments()
 
   const byProfessional = new Map()
   for (const appt of owedAppointments) {
@@ -239,14 +249,7 @@ paymentRouter.post('/payouts', requireAuth, requireAdminRole('PLATFORM_ADMIN'), 
 
   const { professionalId, method, reference, note } = parsed.data
 
-  const owedAppointments = await prisma.appointment.findMany({
-    where: {
-      professionalId,
-      payoutId: null,
-      status: 'COMPLETED',
-      payment: { status: 'PAID' },
-    },
-  })
+  const owedAppointments = await findOwedAppointments({ professionalId })
 
   if (owedAppointments.length === 0) {
     return res.status(400).json({ error: 'Nothing is currently owed to this professional.' })
@@ -296,12 +299,8 @@ paymentRouter.get('/payouts/mine', requireAuth, requireRole('professional'), wra
     orderBy: { paidAt: 'desc' },
   })
 
-  const owed = await prisma.appointment.aggregate({
-    where: { professionalId: req.auth.id, payoutId: null, status: 'COMPLETED', payment: { status: 'PAID' } },
-    _sum: { feeKes: true, platformFeeKes: true },
-  })
-
-  const owedKes = (owed._sum.feeKes ?? 0) - (owed._sum.platformFeeKes ?? 0)
+  const owedAppointments = await findOwedAppointments({ professionalId: req.auth.id })
+  const owedKes = owedAppointments.reduce((sum, a) => sum + (a.feeKes - a.platformFeeKes), 0)
 
   res.json({ payouts, owedKes })
 }))
