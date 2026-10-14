@@ -8,6 +8,7 @@ import { generateOtpCode, hashOtpCode, otpExpiryDate } from '../lib/otp.js'
 import { sendOtpEmail } from '../lib/email.js'
 import { requireAuth } from '../middleware/auth.js'
 import { CURRENT_CONSENT_VERSION } from '../lib/consent.js'
+import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
 
 export const authRouter = Router()
 
@@ -23,6 +24,14 @@ const userRegisterSchema = registerSchema.extend({
   consent: z.literal(true, {
     errorMap: () => ({ message: 'You must accept the privacy consent to create an account.' }),
   }),
+})
+
+// Professionals choose their professional type at sign-up. It defaults to
+// PSYCHOLOGIST only so older sign-up forms that don't send a type keep
+// working; the type is checked against the allowed list and confirmed
+// during KYC verification before the professional is ever listed.
+const professionalRegisterSchema = registerSchema.extend({
+  type: z.enum(PROFESSIONAL_TYPES).default('PSYCHOLOGIST'),
 })
 
 const loginSchema = z.object({
@@ -94,10 +103,10 @@ authRouter.post('/user/login', loginLimiter, async (req, res) => {
 // --- Professional ---
 
 authRouter.post('/professional/register', registerLimiter, async (req, res) => {
-  const parsed = registerSchema.safeParse(req.body)
+  const parsed = professionalRegisterSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  const { fullName, email, password } = parsed.data
+  const { fullName, email, password, type } = parsed.data
   const existing = await prisma.professional.findUnique({ where: { email } })
   if (existing) return res.status(409).json({ error: 'An account with this email already exists.' })
 
@@ -106,7 +115,7 @@ authRouter.post('/professional/register', registerLimiter, async (req, res) => {
       fullName,
       email,
       passwordHash: await hashPassword(password),
-      type: 'PSYCHOLOGIST',
+      type,
       verified: false,
     },
   })

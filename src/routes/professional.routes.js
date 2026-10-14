@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 import { STUDENT_RATE_FEE_CAP_KES } from '../lib/pricing.js'
+import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
 
 export const professionalRouter = Router()
 
@@ -92,6 +93,7 @@ professionalRouter.post(
 // single-segment '/:id' route below regardless of declaration order.
 
 const updateProfileSchema = z.object({
+  type: z.enum(PROFESSIONAL_TYPES).optional(),
   bio: z.string().max(2000).optional(),
   qualifications: z.array(z.string()).optional(),
   focusAreas: z.array(z.string()).optional(),
@@ -125,12 +127,12 @@ professionalRouter.patch('/me/profile', requireAuth, requireRole('professional')
   const current = await prisma.professional.findUnique({ where: { id: req.auth.id } })
   if (!current) return res.status(401).json({ error: 'Authentication required.' })
 
-  // Qualifications is the one field the "Verified by Mindora" badge is
-  // actually vouching for — it's what the reviewed KYC documents (degree
-  // certificate, license) substantiate. Changing it after verification
-  // without re-review would let a claim go unchecked while the verified
-  // badge kept showing, so any real change here automatically un-verifies
-  // the account until admin reviews it again.
+  // Qualifications and professional type are the claims the "Verified by
+  // Mindora" badge actually vouches for — they're what the reviewed KYC
+  // documents (degree certificate, license) substantiate. Changing either
+  // after verification without re-review would let a claim go unchecked
+  // while the verified badge kept showing, so any real change automatically
+  // un-verifies the account until admin reviews it again.
   const data = { ...parsed.data }
   let credentialsChanged = false
 
@@ -141,6 +143,11 @@ professionalRouter.patch('/me/profile', requireAuth, requireRole('professional')
       data.verified = false
       credentialsChanged = true
     }
+  }
+
+  if (parsed.data.type && parsed.data.type !== current.type && current.verified) {
+    data.verified = false
+    credentialsChanged = true
   }
 
   const updated = await prisma.professional.update({
