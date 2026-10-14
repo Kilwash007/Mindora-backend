@@ -89,18 +89,20 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
   const useStudentRate =
     !sponsorshipAvailable && user?.studentRateEligible && professional.studentRateFeeKes != null
 
-  // For university sponsorships, the professional's Student Rate fee is used
-  // when they have one — this keeps sponsored student sessions (such as a
-  // Mindora-funded pilot) at the agreed student rate rather than the
+  // University sponsorships (such as a Mindora-funded campus pilot) are
+  // priced at the professional's Student Rate fee when they have one, so
+  // sponsored student sessions stay at the student rate rather than the
   // professional's standard fee.
-  let fullFee
-  if (sponsorshipAvailable && institution.type === 'UNIVERSITY' && professional.studentRateFeeKes != null) {
-    fullFee = professional.studentRateFeeKes
-  } else if (useStudentRate) {
-    fullFee = professional.studentRateFeeKes
-  } else {
-    fullFee = professional.feeKes ?? 0
-  }
+  const universityStudentRate =
+    sponsorshipAvailable && institution.type === 'UNIVERSITY' && professional.studentRateFeeKes != null
+
+  // Any session priced at the Student Rate fee — whether the student pays
+  // it themselves or a university covers it — uses the Student Rate
+  // commission (25%), so professionals are paid consistently for every
+  // student session.
+  const studentRatePricing = Boolean(useStudentRate || universityStudentRate)
+
+  const fullFee = studentRatePricing ? professional.studentRateFeeKes : professional.feeKes ?? 0
 
   let sponsoringInstitutionId = null
   let institutionCoveredKes = 0
@@ -112,9 +114,9 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
     institutionCoveredKes = Math.min(fullFee, Math.round((fullFee * institution.coveragePercent) / 100))
   }
 
-  // Platform commission: 35% standard, 25% on a Student Rate booking,
-  // and the institution rate on sponsored bookings. See src/lib/pricing.js.
-  const platformFeeKes = calculatePlatformFeeKes(fullFee, institutionType, useStudentRate)
+  // Platform commission: 35% standard, 25% on any Student Rate-priced
+  // session, and 0% on corporate/EAP sponsorships. See src/lib/pricing.js.
+  const platformFeeKes = calculatePlatformFeeKes(fullFee, institutionType, studentRatePricing)
 
   const appointment = await prisma.appointment.create({
     data: {
@@ -124,7 +126,7 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
       type,
       feeKes: fullFee,
       platformFeeKes,
-      isStudentRateBooking: Boolean(useStudentRate),
+      isStudentRateBooking: studentRatePricing,
       sponsoringInstitutionId,
       institutionCoveredKes,
     },
@@ -146,7 +148,7 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
     resourceId: appointment.id,
     metadata: {
       platformFeeKes,
-      isStudentRateBooking: Boolean(useStudentRate),
+      isStudentRateBooking: studentRatePricing,
       ...(sponsoringInstitutionId ? { institutionCoveredKes } : {}),
     },
   })
