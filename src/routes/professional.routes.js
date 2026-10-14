@@ -11,8 +11,9 @@ export const professionalRouter = Router()
 
 // Any authenticated person (user or professional) can browse the directory.
 // Only verified professionals are ever listed publicly. When the requester
-// is a Student Rate-eligible patient, professionals who've opted into the
-// tier (studentRateFeeKes set) and are less experienced/junior
+// is Student Rate-eligible — a verified student, or a member of an active
+// university through its enrollment code — professionals who've opted into
+// the tier (studentRateFeeKes set) and are less experienced/junior
 // (yearsExperience < 3 — the practical stand-in for "freelance," since
 // Mindora doesn't track employment type as its own concept) are sorted
 // first. This is a soft preference, not a filter — every verified
@@ -25,8 +26,13 @@ professionalRouter.get('/', requireAuth, async (req, res) => {
 
   let studentRateEligible = false
   if (req.auth.role === 'user') {
-    const user = await prisma.user.findUnique({ where: { id: req.auth.id }, select: { studentRateEligible: true } })
-    studentRateEligible = user?.studentRateEligible ?? false
+    const user = await prisma.user.findUnique({
+      where: { id: req.auth.id },
+      select: { studentRateEligible: true, institution: { select: { type: true, status: true } } },
+    })
+    const isUniversityMember =
+      user?.institution?.type === 'UNIVERSITY' && user?.institution?.status === 'ACTIVE'
+    studentRateEligible = Boolean(user?.studentRateEligible || isUniversityMember)
   }
 
   if (!studentRateEligible) return res.json(professionals)

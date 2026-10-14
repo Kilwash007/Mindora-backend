@@ -62,6 +62,15 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
   const user = await prisma.user.findUnique({ where: { id: req.auth.id }, include: { institution: true } })
   const institution = user?.institution
 
+  // A patient linked to an ACTIVE university through its enrollment code
+  // is treated as a verified student for the Student Rate — the university
+  // code is itself the proof of student status, so no separate Student
+  // Rate verification is needed.
+  const isUniversityMember = Boolean(
+    institution && institution.type === 'UNIVERSITY' && institution.status === 'ACTIVE'
+  )
+  const studentRateEligible = Boolean(user?.studentRateEligible || isUniversityMember)
+
   // Sponsorship applies only when the patient's institution is ACTIVE, has
   // coverage, and — if it sets sponsoredSessionsPerMember (for example, 2
   // free pilot sessions) — the patient hasn't used them all yet. Cancelled
@@ -85,9 +94,10 @@ appointmentRouter.post('/', requireAuth, requireRole('user'), async (req, res) =
   // Student Rate takes priority over a listed full fee, but defers to an
   // available institution sponsorship — stacking both would be confusing to
   // reconcile. Once a member's sponsored sessions are used up, they fall
-  // back to the Student Rate (if verified) or the standard fee.
+  // back to the Student Rate (verified students and university members) or
+  // the standard fee.
   const useStudentRate =
-    !sponsorshipAvailable && user?.studentRateEligible && professional.studentRateFeeKes != null
+    !sponsorshipAvailable && studentRateEligible && professional.studentRateFeeKes != null
 
   // University sponsorships (such as a Mindora-funded campus pilot) are
   // priced at the professional's Student Rate fee when they have one, so
