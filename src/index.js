@@ -23,7 +23,24 @@ import { groupRouter } from './routes/group.routes.js'
 import { paymentRouter } from './routes/payment.routes.js'
 import { studentRateRouter } from './routes/studentRate.routes.js'
 
+// Process-level safety nets. A failed promise anywhere in the app (e.g. a
+// background job losing the database connection) is logged instead of
+// shutting the API down. A truly uncaught exception leaves the process in an
+// unknown state, so we log it and exit; Render restarts the service.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandled promise rejection:', reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[process] uncaught exception, exiting:', err)
+  process.exit(1)
+})
+
 const app = express()
+
+// Render sits in front of the API as a proxy. Trusting one proxy hop lets
+// req.ip be the real client IP, which the login rate limiter relies on.
+// Without this every user looks like the same address.
+app.set('trust proxy', 1)
 
 // CORS_ORIGIN can hold one address or several separated by commas, e.g.
 // "https://patients.example.com,https://pro.example.com". A trailing slash
@@ -50,6 +67,9 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 app.use(attachAuth)
 app.use('/api', apiLimiter)
 
+// Root and health endpoints. The root route stops Render's own probes from
+// showing up as 404s in the logs.
+app.get('/', (_req, res) => res.json({ service: 'mindora-api', status: 'ok' }))
 app.get('/health', (_req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV }))
 
 app.use('/api/auth', authRouter)
