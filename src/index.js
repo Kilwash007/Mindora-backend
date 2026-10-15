@@ -37,10 +37,12 @@ process.on('uncaughtException', (err) => {
 
 const app = express()
 
-// Render sits in front of the API as a proxy. Trusting one proxy hop lets
-// req.ip be the real client IP, which the login rate limiter relies on.
-// Without this every user looks like the same address.
-app.set('trust proxy', 1)
+// Render forwards requests through several internal proxies on private
+// addresses (10.x etc.). Trusting loopback, link-local and private ranges
+// makes req.ip the first public address in the chain: the real visitor.
+// This is safe because no internet client can connect from a private address,
+// and the login rate limiter depends on it to tell users apart.
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal'])
 
 // CORS_ORIGIN can hold one address or several separated by commas, e.g.
 // "https://patients.example.com,https://pro.example.com". A trailing slash
