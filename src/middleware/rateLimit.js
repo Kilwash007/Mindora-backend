@@ -44,3 +44,23 @@ export const otpVerifyLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many code attempts. Please request a new code.' },
 })
+
+// Asking for a password-reset email: each request sends an email, so cap it
+// hard per IP to stop the endpoint being used to spam someone's inbox.
+export const resetRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many reset requests. Please try again later.' },
+})
+
+// Submitting a reset code. The code itself also dies after 5 wrong tries;
+// this is the per-IP layer on top of that.
+export const resetVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please request a new code.' },
+})

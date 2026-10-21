@@ -1,11 +1,18 @@
+import crypto from 'crypto'
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { hashPassword, verifyPassword } from '../lib/auth.js'
 import { issueSession, refreshSession, revokeRefreshToken, revokeAllSessions } from '../lib/session.js'
-import { loginLimiter, registerLimiter, otpVerifyLimiter } from '../middleware/rateLimit.js'
+import {
+  loginLimiter,
+  registerLimiter,
+  otpVerifyLimiter,
+  resetRequestLimiter,
+  resetVerifyLimiter,
+} from '../middleware/rateLimit.js'
 import { generateOtpCode, hashOtpCode, otpExpiryDate } from '../lib/otp.js'
-import { sendOtpEmail } from '../lib/email.js'
+import { sendOtpEmail, sendPasswordResetEmail } from '../lib/email.js'
 import { requireAuth } from '../middleware/auth.js'
 import { CURRENT_CONSENT_VERSION } from '../lib/consent.js'
 import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
@@ -42,7 +49,7 @@ const loginSchema = z.object({
 // TEMPORARY, staging-only: when DISABLE_OTP=true on the server, user and
 // professional logins accept the fixed code 000000 instead of an emailed
 // code. Admin logins always need the real emailed code. Never set this on
-// production.
+// production. (Password reset deliberately ignores this flag.)
 const OTP_DISABLED = process.env.DISABLE_OTP === 'true'
 if (OTP_DISABLED) {
   console.warn('[auth] DISABLE_OTP is on: user/professional logins accept the fixed test code 000000')
@@ -203,6 +210,115 @@ authRouter.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
   if (!admin) return res.status(404).json({ error: 'Account not found.' })
   const session = await issueSession({ id: admin.id, role: 'admin', adminRole: admin.role })
   res.json({ ...session, admin: { id: admin.id, fullName: admin.fullName, role: admin.role } })
+})
+
+// --- Password reset (users and professionals only) ---
+//
+// Admin passwords are reset by another platform admin, never by email.
+// Reset codes live in their own table so one can never be submitted to
+// /verify-otp and used to sign in.
+
+const RESET_MAX_ATTEMPTS = 5
+const RESET_COOLDOWN_MS = 60 * 1000
+
+const forgotSchema = z.object({
+  role: z.enum(['user', 'professional']),
+  email: z.string().email(),
+})
+
+const resetSchema = z.object({
+  role: z.enum(['user', 'professional']),
+  email: z.string().email(),
+  code: z.string().length(6),
+  newPassword: z.string().min(8),
+})
+
+function accountTable(client, role) {
+  return role === 'user' ? client.user : client.professional
+}
+
+authRouter.post('/forgot-password', resetRequestLimiter, async (req, res) => {
+  const parsed = forgotSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const { role, email } = parsed.data
+
+  // Same answer, sent straight away, whether or not the account exists, so
+  // the response (and its timing) never reveals which emails are registered.
+  res.json({ ok: true })
+
+  try {
+    const account = await accountTable(prisma, role).findUnique({ where: { email }, select: { id: true } })
+    if (!account) return
+
+    // One code per minute per account, so the endpoint can't flood an inbox.
+    const recent = await prisma.passwordReset.findFirst({
+      where: { email, role, createdAt: { gt: new Date(Date.now() - RESET_COOLDOWN_MS) } },
+    })
+    if (recent) return
+
+    // A new code replaces any earlier unused one.
+    await prisma.passwordReset.updateMany({
+      where: { email, role, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+
+    const code = generateOtpCode()
+    await prisma.passwordReset.create({
+      data: { email, role, codeHash: hashOtpCode(code), expiresAt: otpExpiryDate() },
+    })
+    await sendPasswordResetEmail(email, code)
+  } catch (err) {
+    console.error('[auth] password reset request failed:', err.message)
+  }
+})
+
+authRouter.post('/reset-password', resetVerifyLimiter, async (req, res) => {
+  const parsed = resetSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const { role, email, code, newPassword } = parsed.data
+  const invalid = () => res.status(401).json({ error: 'Invalid or expired code.' })
+
+  const reset = await prisma.passwordReset.findFirst({
+    where: { email, role, consumedAt: null, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  })
+  if (!reset || reset.attempts >= RESET_MAX_ATTEMPTS) return invalid()
+
+  const given = Buffer.from(hashOtpCode(code), 'hex')
+  const expected = Buffer.from(reset.codeHash, 'hex')
+  const matches = given.length === expected.length && crypto.timingSafeEqual(given, expected)
+
+  if (!matches) {
+    await prisma.passwordReset.update({ where: { id: reset.id }, data: { attempts: { increment: 1 } } })
+    return invalid()
+  }
+
+  const account = await accountTable(prisma, role).findUnique({ where: { email }, select: { id: true } })
+  if (!account) return invalid()
+
+  const passwordHash = await hashPassword(newPassword)
+
+  // Claim the code and change the password in one transaction, so two
+  // requests at the same moment cannot both use the same code.
+  const changed = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.passwordReset.updateMany({
+      where: { id: reset.id, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+    if (claimed.count === 0) return false
+
+    await accountTable(tx, role).update({ where: { id: account.id }, data: { passwordHash } })
+    // Any login code that was already on its way is no longer valid either.
+    await tx.loginOtp.updateMany({ where: { email, role, consumedAt: null }, data: { consumedAt: new Date() } })
+    return true
+  })
+  if (!changed) return invalid()
+
+  // Everyone signed in as this account is signed out.
+  await revokeAllSessions(role, account.id)
+  res.json({ ok: true })
 })
 
 // --- Session management ---

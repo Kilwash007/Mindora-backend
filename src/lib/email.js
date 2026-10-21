@@ -19,6 +19,22 @@ export async function sendOtpEmail(to, code) {
   })
 }
 
+export async function sendPasswordResetEmail(to, code) {
+  await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject: 'Your Mindora password reset code',
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px;">
+        <h2 style="color: #0f1e3d;">Reset your Mindora password</h2>
+        <p style="color: #565d70;">Enter this code on the reset page to choose a new password:</p>
+        <p style="font-size: 32px; font-weight: bold; letter-spacing: 4px; color: #0f1e3d;">${code}</p>
+        <p style="color: #565d70;">This code expires in 10 minutes. If you didn't ask to reset your password, you can safely ignore this email and your password will stay the same.</p>
+      </div>
+    `,
+  })
+}
+
 export async function sendAppointmentReminderEmail(to, { professionalName, scheduledFor, type, meetingUrl }) {
   const when = new Date(scheduledFor).toLocaleString('en-KE', {
     dateStyle: 'full',

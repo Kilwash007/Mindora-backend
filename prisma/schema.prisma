@@ -691,3 +691,16 @@ model AuditLog {
   @@index([createdAt])
   @@map("audit_logs")
 }
+model PasswordReset {
+  id         String    @id @default(uuid())
+  email      String
+  role       String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([email, role])
+  @@map("password_resets")
+}
