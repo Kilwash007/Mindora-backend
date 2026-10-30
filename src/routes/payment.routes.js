@@ -33,7 +33,7 @@ async function findOwedAppointments(where = {}) {
 }
 
 // A completed triage is owed to its clinician once, when it was either free
-// (a crisis triage, paid for by Mindora) or its KES payment is PAID. The
+// (a crisis triage or one covered by an institution, paid for by Mindora) or its KES payment is PAID. The
 // amount was fixed at completion in clinicianPayoutKes.
 async function findOwedTriages(clinicianId) {
   return prisma.triage.findMany({
@@ -42,7 +42,7 @@ async function findOwedTriages(clinicianId) {
       payoutId: null,
       status: 'COMPLETED',
       clinicianPayoutKes: { gt: 0 },
-      OR: [{ isFree: true }, { payment: { status: 'PAID' } }],
+      OR: [{ isFree: true }, { sponsoringInstitutionId: { not: null } }, { payment: { status: 'PAID' } }],
     },
     include: { clinician: { select: { id: true, fullName: true } } },
   })

@@ -5,6 +5,7 @@ import { requireAuth, requireRole, requireAgreement } from '../../middleware/aut
 import { audit } from '../../lib/audit.js'
 import { initiateStkPush, normalizeKenyanPhone } from '../../lib/mpesa.js'
 import { wrap, HttpError } from '../../lib/wrap.js'
+import { findTriageSponsor } from '../../lib/sponsorship.js'
 import { getPriceRow, priceFor, isStudentEligible, professionalPayoutKes } from '../../lib/priceList.js'
 import {
   CRISIS_RESOURCES,
@@ -26,6 +27,7 @@ const PAYMENT_RETRY_GUARD_MS = 2 * 60 * 1000
 
 const USER_INCLUDE = {
   clinician: { select: { id: true, fullName: true, type: true } },
+  sponsoringInstitution: { select: { name: true } },
   payment: true,
 }
 
@@ -39,6 +41,7 @@ function userView(t) {
     checkInId: t.checkInId,
     status: t.status,
     isFree: t.isFree,
+    sponsoredBy: t.sponsoringInstitution?.name ?? null,
     urgency: t.urgency,
     careLevel: t.careLevel,
     creditKes: t.creditKes,
@@ -147,18 +150,23 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
     if (!row || !row.active) throw new HttpError(503, 'Triage is not available right now.', 'SERVICE_UNAVAILABLE')
   }
 
+  // A pilot member whose institution covers triage gets their first triage
+  // free (once). It skips payment and joins the queue like a paid triage.
+  const sponsor = crisis ? null : await findTriageSponsor(userId)
+
   let created
   try {
     created = await prisma.$transaction(async (tx) => {
-      const clinicianId = crisis ? await assignClinician(tx) : null
+      const clinicianId = crisis || sponsor ? await assignClinician(tx) : null
       return tx.triage.create({
         data: {
           userId,
           checkInId: checkIn.id,
           isFree: crisis,
-          status: crisis ? 'QUEUED' : 'AWAITING_PAYMENT',
+          status: crisis || sponsor ? 'QUEUED' : 'AWAITING_PAYMENT',
           urgency: crisis ? 'URGENT' : null,
           clinicianId,
+          sponsoringInstitutionId: sponsor?.id ?? null,
         },
         include: USER_INCLUDE,
       })
@@ -177,7 +185,7 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
     action: 'triage.create',
     resourceType: 'triage',
     resourceId: created.id,
-    metadata: { isFree: created.isFree },
+    metadata: { isFree: created.isFree, sponsored: Boolean(created.sponsoringInstitutionId) },
   })
 
   res.status(201).json(userView(created))
@@ -287,6 +295,9 @@ triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req,
   const triage = await prisma.triage.findUnique({ where: { id: req.params.id }, include: { payment: true } })
   if (!triage || triage.userId !== req.auth.id) throw new HttpError(404, 'Triage not found.')
   if (triage.isFree) throw new HttpError(400, 'This triage is free. There is nothing to pay.')
+  if (triage.sponsoringInstitutionId) {
+    throw new HttpError(400, 'This triage is covered by your institution. There is nothing to pay.')
+  }
   if (triage.status !== 'AWAITING_PAYMENT' || triage.payment?.status === 'PAID') {
     throw new HttpError(409, 'This triage has already been paid for or is closed.')
   }

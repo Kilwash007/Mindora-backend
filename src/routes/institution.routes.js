@@ -26,6 +26,7 @@ const createSchema = z.object({
   coveragePercent: z.number().int().min(0).max(100).optional(),
   memberLimit: limitField,
   sponsoredSessionsPerMember: limitField,
+  coversTriage: z.boolean().optional(),
 })
 
 institutionRouter.get('/', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
@@ -70,6 +71,7 @@ const updateSchema = z.object({
   coveragePercent: z.number().int().min(0).max(100).optional(),
   memberLimit: limitField,
   sponsoredSessionsPerMember: limitField,
+  coversTriage: z.boolean().optional(),
 })
 
 institutionRouter.patch('/:id', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
@@ -115,6 +117,10 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
     }),
   ])
 
+  const sponsoredTriageCount = await prisma.triage.count({
+    where: { sponsoringInstitutionId: institution.id, status: { not: 'CANCELLED' } },
+  })
+
   await audit({
     actorType: 'admin',
     actorId: req.auth.id,
@@ -130,6 +136,8 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
       institution.memberLimit == null ? null : Math.max(0, institution.memberLimit - memberCount),
     sponsoredSessionsPerMember: institution.sponsoredSessionsPerMember,
     sponsoredAppointmentCount,
+    sponsoredTriageCount,
+    coversTriage: institution.coversTriage,
     totalCoveredKes: coverageSum._sum.institutionCoveredKes ?? 0,
   })
 })

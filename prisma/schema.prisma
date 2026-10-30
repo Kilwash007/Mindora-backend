@@ -354,30 +354,32 @@ model ServicePrice {
 // ---------------------------------------------------------------------------
 
 model Triage {
-  id                  String         @id @default(uuid())
-  userId              String
-  user                User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  checkInId           String         @unique
-  checkIn             CheckIn        @relation(fields: [checkInId], references: [id], onDelete: Cascade)
-  clinicianId         String?
-  clinician           Professional?  @relation(fields: [clinicianId], references: [id], onDelete: SetNull)
-  status              TriageStatus   @default(AWAITING_PAYMENT)
-  isFree              Boolean        @default(false)
-  urgency             TriageUrgency?
-  careLevel           CareLevel?
-  icd10Code           String?
-  icd10Label          String?
-  summary             String?
-  creditKes           Int            @default(0)
-  creditAppointmentId String?        @unique
-  creditAppointment   Appointment?   @relation("TriageCreditAppointment", fields: [creditAppointmentId], references: [id], onDelete: SetNull)
-  clinicianPayoutKes  Int            @default(0)
-  payoutId            String?
-  payout              Payout?        @relation(fields: [payoutId], references: [id], onDelete: SetNull)
-  startedAt           DateTime?
-  completedAt         DateTime?
-  createdAt           DateTime       @default(now())
-  updatedAt           DateTime       @updatedAt
+  id                      String         @id @default(uuid())
+  userId                  String
+  user                    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkInId               String         @unique
+  checkIn                 CheckIn        @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  clinicianId             String?
+  clinician               Professional?  @relation(fields: [clinicianId], references: [id], onDelete: SetNull)
+  status                  TriageStatus   @default(AWAITING_PAYMENT)
+  isFree                  Boolean        @default(false)
+  urgency                 TriageUrgency?
+  careLevel               CareLevel?
+  icd10Code               String?
+  icd10Label              String?
+  summary                 String?
+  creditKes               Int            @default(0)
+  creditAppointmentId     String?        @unique
+  creditAppointment       Appointment?   @relation("TriageCreditAppointment", fields: [creditAppointmentId], references: [id], onDelete: SetNull)
+  clinicianPayoutKes      Int            @default(0)
+  payoutId                String?
+  payout                  Payout?        @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  sponsoringInstitutionId String?
+  sponsoringInstitution   Institution?   @relation(fields: [sponsoringInstitutionId], references: [id], onDelete: SetNull)
+  startedAt               DateTime?
+  completedAt             DateTime?
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
 
   appointments Appointment[] @relation("TriageAppointments")
   payment      Payment?
@@ -387,6 +389,7 @@ model Triage {
   @@index([clinicianId, status])
   @@index([userId])
   @@index([payoutId])
+  @@index([sponsoringInstitutionId])
   @@map("triages")
 }
 
@@ -754,11 +757,13 @@ model Institution {
   enrollmentCode             String            @unique
   memberLimit                Int?
   sponsoredSessionsPerMember Int?
+  coversTriage               Boolean           @default(false)
   createdAt                  DateTime          @default(now())
   updatedAt                  DateTime          @updatedAt
 
   members               User[]
   sponsoredAppointments Appointment[]
+  sponsoredTriages      Triage[]
 
   @@map("institutions")
 }

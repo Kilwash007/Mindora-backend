@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
+import { hasUsedCoveredTriage } from '../lib/sponsorship.js'
 
 export const accountRouter = Router()
 
@@ -203,6 +204,8 @@ accountRouter.get('/institution', requireAuth, requireRole('user'), async (req, 
     },
   })
 
+  const triageCoveredUsed = user.institution.coversTriage ? await hasUsedCoveredTriage(req.auth.id) : false
+
   res.json({
     name: user.institution.name,
     type: user.institution.type,
@@ -210,5 +213,7 @@ accountRouter.get('/institution', requireAuth, requireRole('user'), async (req, 
     status: user.institution.status,
     sponsoredSessionsPerMember: user.institution.sponsoredSessionsPerMember,
     sponsoredSessionsUsed,
+    coversTriage: user.institution.coversTriage,
+    triageCoveredUsed,
   })
 })
