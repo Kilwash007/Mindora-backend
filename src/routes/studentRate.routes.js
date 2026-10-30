@@ -6,6 +6,7 @@ import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3
 import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
+import { notifyProofDecision } from '../lib/proofReview.js'
 
 export const studentRateRouter = Router()
 
@@ -126,7 +127,7 @@ studentRateRouter.get('/status', requireAuth, requireRole('user'), wrap(async (r
 
 studentRateRouter.get('/verifications', requireAuth, requireAdminRole('PLATFORM_ADMIN'), wrap(async (req, res) => {
   const verifications = await prisma.studentRateVerification.findMany({
-    include: { user: { select: { fullName: true, email: true } } },
+    include: { user: { select: { fullName: true, email: true, institution: { select: { name: true } } } } },
     orderBy: { createdAt: 'desc' },
   })
 
@@ -136,6 +137,7 @@ studentRateRouter.get('/verifications', requireAuth, requireAdminRole('PLATFORM_
       userId: v.userId,
       userFullName: v.user.fullName,
       userEmail: v.user.email,
+      institutionName: v.user.institution?.name ?? null,
       method: v.method,
       evidence: v.evidence,
       hasFile: Boolean(v.filePath),
@@ -167,6 +169,9 @@ studentRateRouter.patch('/verifications/:id/review', requireAuth, requireAdminRo
   if (parsed.data.status === 'APPROVED') {
     await prisma.user.update({ where: { id: verification.userId }, data: { studentRateEligible: true } })
   }
+
+  // Tell the person what was decided. Never blocks or undoes the review.
+  notifyProofDecision(verification.id)
 
   await audit({
     actorType: 'admin',

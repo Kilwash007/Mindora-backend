@@ -19,6 +19,7 @@ import { accountRouter } from './routes/account.routes.js'
 import { startAppointmentReminderJob } from './jobs/appointmentReminders.js'
 import { startTriageEscalationJob } from './jobs/triageEscalations.js'
 import { startReleaseUnpaidSlotsJob } from './jobs/releaseUnpaidSlots.js'
+import { startPurgeProofFilesJob } from './jobs/purgeProofFiles.js'
 import { reviewRouter } from './routes/review.routes.js'
 import { messageRouter } from './routes/message.routes.js'
 import { groupRouter } from './routes/group.routes.js'
@@ -141,4 +142,5 @@ app.listen(port, () => {
   startAppointmentReminderJob()
   startTriageEscalationJob()
   startReleaseUnpaidSlotsJob()
+  startPurgeProofFilesJob()
 })

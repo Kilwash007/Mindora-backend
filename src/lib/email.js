@@ -175,3 +175,34 @@ export async function sendSlotReleasedEmail(to, { professionalName, scheduledFor
     `,
   })
 }
+
+// What was decided about a person's proof of being a student. No reviewer
+// notes and nothing about their health: only the decision and what it means.
+// EMAIL_DISABLED=true skips sending (used by local tests).
+export async function sendProofReviewedEmail(to, { name, approved, programme, freeTriage }) {
+  if (process.env.EMAIL_DISABLED === 'true') return
+
+  const base = (process.env.PATIENT_PORTAL_URL || '').replace(/\/$/, '')
+  const link = base ? `<p><a href="${base}">Open Mindora</a></p>` : '<p>Sign in to Mindora to continue.</p>'
+
+  const subject = approved ? 'Your student proof was approved' : "We couldn't approve your student proof"
+  const body = approved
+    ? `<p>We have approved your proof that you are a student. The student price now applies to your sessions${
+        programme ? `, and cover from ${escapeHtml(programme)} applies too` : ''
+      }.</p>${freeTriage ? '<p>Your first triage is free. Start with the free screening.</p>' : ''}`
+    : '<p>We could not approve the proof you sent. You can send another from the "One more step" page or the Student Rate page after you sign in. The reason, if we gave one, is shown there.</p>'
+
+  await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject,
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px;">
+        <h2 style="color: #0f1e3d;">${subject}</h2>
+        <p>Hello ${escapeHtml(name)},</p>
+        ${body}
+        ${link}
+      </div>
+    `,
+  })
+}
