@@ -46,18 +46,10 @@ const loginSchema = z.object({
   password: z.string().min(1),
 })
 
-// TEMPORARY, staging-only: when DISABLE_OTP=true on the server, user and
-// professional logins accept the fixed code 000000 instead of an emailed
-// code. Admin logins always need the real emailed code. Never set this on
-// production. (Password reset deliberately ignores this flag.)
-const OTP_DISABLED = process.env.DISABLE_OTP === 'true'
-if (OTP_DISABLED) {
-  console.warn('[auth] DISABLE_OTP is on: user/professional logins accept the fixed test code 000000')
-}
-
+// Every login, for every role, gets a freshly generated code sent to the
+// account's email address. There is no fixed or test code path.
 async function issueOtp(email, role) {
-  const useTestCode = OTP_DISABLED && role !== 'admin'
-  const code = useTestCode ? '000000' : generateOtpCode()
+  const code = generateOtpCode()
   await prisma.loginOtp.create({
     data: {
       email,
@@ -66,7 +58,7 @@ async function issueOtp(email, role) {
       expiresAt: otpExpiryDate(),
     },
   })
-  if (!useTestCode) await sendOtpEmail(email, code)
+  await sendOtpEmail(email, code)
 }
 
 // --- User ---
@@ -327,12 +319,12 @@ const refreshSchema = z.object({ refreshToken: z.string().min(1) })
 
 authRouter.post('/refresh', async (req, res) => {
   const parsed = refreshSchema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-
-  const session = await refreshSession(parsed.data.refreshToken)
-  if (!session) return res.status(401).json({ error: 'Session expired. Please log in again.' })
-
-  res.json(session)
+  if (parsed.success) {
+    const session = await refreshSession(parsed.data.refreshToken)
+    if (!session) return res.status(401).json({ error: 'Session expired. Please log in again.' })
+    return res.json(session)
+  }
+  return res.status(400).json({ error: parsed.error.flatten() })
 })
 
 authRouter.post('/logout', async (req, res) => {
