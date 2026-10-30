@@ -6,6 +6,11 @@ import { audit } from '../lib/audit.js'
 
 export const messageRouter = Router()
 
+// Everything here is the therapy conversation between a patient and a
+// professional they have an appointment with. Triage chat messages carry a
+// triageId and live in their own thread (see routes/v1/triage.js), so they
+// are left out of every query below with triageId: null.
+
 // Confirms a real booked appointment (any status, past or upcoming) exists
 // between this user and professional — the gate that keeps messaging
 // restricted to pairs who actually have a care relationship, rather than
@@ -34,13 +39,14 @@ messageRouter.get('/conversations', requireAuth, requireRole('user', 'profession
       appointments.map(async (a) => {
         const [lastMessage, unreadCount] = await Promise.all([
           prisma.message.findFirst({
-            where: { userId: req.auth.id, professionalId: a.professionalId },
+            where: { userId: req.auth.id, professionalId: a.professionalId, triageId: null },
             orderBy: { createdAt: 'desc' },
           }),
           prisma.message.count({
             where: {
               userId: req.auth.id,
               professionalId: a.professionalId,
+              triageId: null,
               senderRole: 'professional',
               readAt: null,
             },
@@ -69,13 +75,14 @@ messageRouter.get('/conversations', requireAuth, requireRole('user', 'profession
     appointments.map(async (a) => {
       const [lastMessage, unreadCount] = await Promise.all([
         prisma.message.findFirst({
-          where: { userId: a.userId, professionalId: req.auth.id },
+          where: { userId: a.userId, professionalId: req.auth.id, triageId: null },
           orderBy: { createdAt: 'desc' },
         }),
         prisma.message.count({
           where: {
             userId: a.userId,
             professionalId: req.auth.id,
+            triageId: null,
             senderRole: 'user',
             readAt: null,
           },
@@ -110,13 +117,13 @@ messageRouter.get(
     if (!allowed) return res.status(403).json({ error: 'No shared appointment with this person.' })
 
     const messages = await prisma.message.findMany({
-      where: { userId, professionalId },
+      where: { userId, professionalId, triageId: null },
       orderBy: { createdAt: 'asc' },
     })
 
     const incomingSenderRole = req.auth.role === 'user' ? 'professional' : 'user'
     await prisma.message.updateMany({
-      where: { userId, professionalId, senderRole: incomingSenderRole, readAt: null },
+      where: { userId, professionalId, triageId: null, senderRole: incomingSenderRole, readAt: null },
       data: { readAt: new Date() },
     })
 
