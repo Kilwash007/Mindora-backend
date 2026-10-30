@@ -4,10 +4,16 @@ import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { initiateStkPush, normalizeKenyanPhone } from '../lib/mpesa.js'
+import { assignClinician } from '../lib/triage.js'
 
 export const paymentRouter = Router()
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
+// A second payment prompt is refused for this long after the first, so a
+// patient who answers a slow first prompt is never paying against a payment
+// record that has already been replaced.
+const PAYMENT_RETRY_GUARD_MS = 2 * 60 * 1000
 
 // A completed appointment is owed to the professional (once not yet in a
 // payout) when either the patient's M-Pesa payment is PAID, or an
@@ -24,6 +30,22 @@ async function findOwedAppointments(where = {}) {
     include: { payment: true, professional: { select: { id: true, fullName: true } } },
   })
   return candidates.filter(isSettleable)
+}
+
+// A completed triage is owed to its clinician once, when it was either free
+// (a crisis triage, paid for by Mindora) or its KES payment is PAID. The
+// amount was fixed at completion in clinicianPayoutKes.
+async function findOwedTriages(clinicianId) {
+  return prisma.triage.findMany({
+    where: {
+      ...(clinicianId ? { clinicianId } : { clinicianId: { not: null } }),
+      payoutId: null,
+      status: 'COMPLETED',
+      clinicianPayoutKes: { gt: 0 },
+      OR: [{ isFree: true }, { payment: { status: 'PAID' } }],
+    },
+    include: { clinician: { select: { id: true, fullName: true } } },
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +75,15 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
   }
   if (appointment.payment?.status === 'PAID') {
     return res.status(409).json({ error: 'This appointment has already been paid for.' })
+  }
+  if (
+    appointment.payment?.status === 'PENDING' &&
+    Date.now() - new Date(appointment.payment.updatedAt).getTime() < PAYMENT_RETRY_GUARD_MS
+  ) {
+    return res.status(409).json({
+      error: 'A payment prompt was just sent to your phone. Please answer it, or wait a minute and try again.',
+      code: 'PAYMENT_PENDING',
+    })
   }
 
   // What the patient actually owes, net of any institution coverage.
@@ -150,7 +181,36 @@ paymentRouter.get('/appointment/:appointmentId', requireAuth, requireRole('user'
 // so this route is deliberately outside requireAuth. It always responds
 // 200 with ResultCode 0 to Safaricom regardless of what we found, because
 // a non-200 response makes Safaricom retry the callback repeatedly.
+//
+// A payment that is already PAID is never changed again, so a duplicate or
+// late callback cannot undo a confirmed payment. When a payment is
+// confirmed, what it was for is updated in the same transaction:
+//   - a triage payment moves the triage into the queue and assigns a clinician
+//   - an online appointment gets its video link
 // ---------------------------------------------------------------------------
+
+async function onTriagePaid(tx, payment) {
+  const triage = await tx.triage.findUnique({ where: { id: payment.triageId } })
+  if (!triage || triage.status !== 'AWAITING_PAYMENT') {
+    console.error('[mpesa callback] Paid triage is not awaiting payment:', payment.triageId, triage?.status)
+    return
+  }
+  const clinicianId = await assignClinician(tx)
+  await tx.triage.update({
+    where: { id: triage.id },
+    data: { status: 'QUEUED', creditKes: payment.amountKes, clinicianId },
+  })
+}
+
+async function onAppointmentPaid(tx, payment) {
+  const appointment = await tx.appointment.findUnique({ where: { id: payment.appointmentId } })
+  if (appointment && appointment.type === 'ONLINE' && !appointment.meetingUrl && appointment.status !== 'CANCELLED') {
+    await tx.appointment.update({
+      where: { id: appointment.id },
+      data: { meetingUrl: `https://meet.jit.si/mindora-${appointment.id}` },
+    })
+  }
+}
 
 paymentRouter.post('/callback', wrap(async (req, res) => {
   const body = req.body?.Body?.stkCallback
@@ -168,9 +228,12 @@ paymentRouter.post('/callback', wrap(async (req, res) => {
     where: { checkoutRequestId: body.CheckoutRequestID },
   })
   if (!payment) {
-    console.error('[mpesa callback] No matching payment for', body.CheckoutRequestID)
+    console.error('[mpesa callback] No matching payment for', body.CheckoutRequestID, JSON.stringify(req.body))
     return ack()
   }
+
+  // Already confirmed: nothing a later callback says can change it.
+  if (payment.status === 'PAID') return ack()
 
   const succeeded = body.ResultCode === 0
   let mpesaReceiptNumber = null
@@ -180,16 +243,30 @@ paymentRouter.post('/callback', wrap(async (req, res) => {
     mpesaReceiptNumber = item?.Value ?? null
   }
 
-  await prisma.payment.update({
-    where: { id: payment.id },
-    data: {
-      status: succeeded ? 'PAID' : 'FAILED',
-      resultDesc: body.ResultDesc ?? null,
-      mpesaReceiptNumber,
-      paidAt: succeeded ? new Date() : null,
-      rawCallback: req.body,
-    },
-  })
+  try {
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.payment.updateMany({
+        where: { id: payment.id, status: { not: 'PAID' } },
+        data: {
+          status: succeeded ? 'PAID' : 'FAILED',
+          resultDesc: body.ResultDesc ?? null,
+          mpesaReceiptNumber,
+          paidAt: succeeded ? new Date() : null,
+          rawCallback: req.body,
+        },
+      })
+      if (claimed.count === 0) return // another callback got there first
+
+      if (succeeded) {
+        if (payment.triageId) await onTriagePaid(tx, payment)
+        else if (payment.appointmentId) await onAppointmentPaid(tx, payment)
+      }
+    })
+  } catch (err) {
+    // Money may have moved. Log everything needed to reconcile by hand.
+    console.error('[mpesa callback] FAILED to record payment', payment.id, err, JSON.stringify(req.body))
+    return ack()
+  }
 
   await audit({
     actorType: 'system',
@@ -197,37 +274,47 @@ paymentRouter.post('/callback', wrap(async (req, res) => {
     action: succeeded ? 'payment.succeeded' : 'payment.failed',
     resourceType: 'payment',
     resourceId: payment.id,
-    metadata: { resultDesc: body.ResultDesc, mpesaReceiptNumber },
+    metadata: { resultDesc: body.ResultDesc, mpesaReceiptNumber, triageId: payment.triageId ?? undefined },
   })
 
   ack()
 }))
 
 // ---------------------------------------------------------------------------
-// Admin: the payout ledger — what's owed to each professional, and
-// recording a manual settlement
+// Admin: the payout ledger — what's owed to each professional (sessions
+// and triages), and recording a manual settlement
 // ---------------------------------------------------------------------------
 
 paymentRouter.get('/ledger', requireAuth, requireAdminRole('PLATFORM_ADMIN'), wrap(async (req, res) => {
-  const owedAppointments = await findOwedAppointments()
+  const [owedAppointments, owedTriages] = await Promise.all([findOwedAppointments(), findOwedTriages()])
 
   const byProfessional = new Map()
-  for (const appt of owedAppointments) {
-    const payoutAmount = appt.feeKes - appt.platformFeeKes
-    const key = appt.professional.id
-    if (!byProfessional.has(key)) {
-      byProfessional.set(key, {
-        professionalId: appt.professional.id,
-        professionalName: appt.professional.fullName,
+  const entryFor = (id, name) => {
+    if (!byProfessional.has(id)) {
+      byProfessional.set(id, {
+        professionalId: id,
+        professionalName: name,
         owedKes: 0,
         appointmentCount: 0,
         appointmentIds: [],
+        triageCount: 0,
+        triageIds: [],
       })
     }
-    const entry = byProfessional.get(key)
-    entry.owedKes += payoutAmount
+    return byProfessional.get(id)
+  }
+
+  for (const appt of owedAppointments) {
+    const entry = entryFor(appt.professional.id, appt.professional.fullName)
+    entry.owedKes += appt.feeKes - appt.platformFeeKes
     entry.appointmentCount += 1
     entry.appointmentIds.push(appt.id)
+  }
+  for (const t of owedTriages) {
+    const entry = entryFor(t.clinician.id, t.clinician.fullName)
+    entry.owedKes += t.clinicianPayoutKes
+    entry.triageCount += 1
+    entry.triageIds.push(t.id)
   }
 
   res.json(Array.from(byProfessional.values()).sort((a, b) => b.owedKes - a.owedKes))
@@ -241,32 +328,57 @@ const createPayoutSchema = z.object({
 })
 
 // Settles everything currently owed to one professional in a single batch
-// — exactly the appointments the ledger endpoint above would show them,
-// computed fresh here so nothing can be settled twice by a stale list.
+// — exactly the sessions and triages the ledger endpoint above would show
+// them, computed fresh here so nothing can be settled twice by a stale list.
 paymentRouter.post('/payouts', requireAuth, requireAdminRole('PLATFORM_ADMIN'), wrap(async (req, res) => {
   const parsed = createPayoutSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
   const { professionalId, method, reference, note } = parsed.data
 
-  const owedAppointments = await findOwedAppointments({ professionalId })
+  const [owedAppointments, owedTriages] = await Promise.all([
+    findOwedAppointments({ professionalId }),
+    findOwedTriages(professionalId),
+  ])
 
-  if (owedAppointments.length === 0) {
+  if (owedAppointments.length === 0 && owedTriages.length === 0) {
     return res.status(400).json({ error: 'Nothing is currently owed to this professional.' })
   }
 
-  const totalOwedKes = owedAppointments.reduce((sum, a) => sum + (a.feeKes - a.platformFeeKes), 0)
+  const totalOwedKes =
+    owedAppointments.reduce((sum, a) => sum + (a.feeKes - a.platformFeeKes), 0) +
+    owedTriages.reduce((sum, t) => sum + t.clinicianPayoutKes, 0)
 
-  const payout = await prisma.$transaction(async (tx) => {
-    const created = await tx.payout.create({
-      data: { professionalId, amountKes: totalOwedKes, method, reference, note },
+  const appointmentIds = owedAppointments.map((a) => a.id)
+  const triageIds = owedTriages.map((t) => t.id)
+
+  let payout
+  try {
+    payout = await prisma.$transaction(async (tx) => {
+      const created = await tx.payout.create({
+        data: { professionalId, amountKes: totalOwedKes, method, reference, note },
+      })
+      // payoutId: null in the filter means a row another admin settled a
+      // moment ago is not counted again; the whole batch is rolled back.
+      const a = await tx.appointment.updateMany({
+        where: { id: { in: appointmentIds }, payoutId: null },
+        data: { payoutId: created.id },
+      })
+      const t = await tx.triage.updateMany({
+        where: { id: { in: triageIds }, payoutId: null },
+        data: { payoutId: created.id },
+      })
+      if (a.count !== appointmentIds.length || t.count !== triageIds.length) {
+        throw new Error('LEDGER_CHANGED')
+      }
+      return created
     })
-    await tx.appointment.updateMany({
-      where: { id: { in: owedAppointments.map((a) => a.id) } },
-      data: { payoutId: created.id },
-    })
-    return created
-  })
+  } catch (err) {
+    if (err.message === 'LEDGER_CHANGED') {
+      return res.status(409).json({ error: 'The ledger changed while you were settling. Please reload and try again.' })
+    }
+    throw err
+  }
 
   await audit({
     actorType: 'admin',
@@ -274,7 +386,12 @@ paymentRouter.post('/payouts', requireAuth, requireAdminRole('PLATFORM_ADMIN'), 
     action: 'payout.create',
     resourceType: 'payout',
     resourceId: payout.id,
-    metadata: { professionalId, amountKes: totalOwedKes, appointmentCount: owedAppointments.length },
+    metadata: {
+      professionalId,
+      amountKes: totalOwedKes,
+      appointmentCount: appointmentIds.length,
+      triageCount: triageIds.length,
+    },
   })
 
   res.status(201).json(payout)
@@ -285,6 +402,7 @@ paymentRouter.get('/payouts', requireAuth, requireAdminRole('PLATFORM_ADMIN'), w
     include: {
       professional: { select: { fullName: true } },
       appointments: { select: { id: true, scheduledFor: true, feeKes: true, platformFeeKes: true } },
+      triages: { select: { id: true, completedAt: true, clinicianPayoutKes: true } },
     },
     orderBy: { paidAt: 'desc' },
   })
@@ -295,12 +413,20 @@ paymentRouter.get('/payouts', requireAuth, requireAdminRole('PLATFORM_ADMIN'), w
 paymentRouter.get('/payouts/mine', requireAuth, requireRole('professional'), wrap(async (req, res) => {
   const payouts = await prisma.payout.findMany({
     where: { professionalId: req.auth.id },
-    include: { appointments: { select: { id: true, scheduledFor: true, feeKes: true, platformFeeKes: true } } },
+    include: {
+      appointments: { select: { id: true, scheduledFor: true, feeKes: true, platformFeeKes: true } },
+      triages: { select: { id: true, completedAt: true, clinicianPayoutKes: true } },
+    },
     orderBy: { paidAt: 'desc' },
   })
 
-  const owedAppointments = await findOwedAppointments({ professionalId: req.auth.id })
-  const owedKes = owedAppointments.reduce((sum, a) => sum + (a.feeKes - a.platformFeeKes), 0)
+  const [owedAppointments, owedTriages] = await Promise.all([
+    findOwedAppointments({ professionalId: req.auth.id }),
+    findOwedTriages(req.auth.id),
+  ])
+  const owedKes =
+    owedAppointments.reduce((sum, a) => sum + (a.feeKes - a.platformFeeKes), 0) +
+    owedTriages.reduce((sum, t) => sum + t.clinicianPayoutKes, 0)
 
   res.json({ payouts, owedKes })
 }))

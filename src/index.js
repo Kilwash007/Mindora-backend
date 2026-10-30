@@ -22,6 +22,7 @@ import { messageRouter } from './routes/message.routes.js'
 import { groupRouter } from './routes/group.routes.js'
 import { paymentRouter } from './routes/payment.routes.js'
 import { studentRateRouter } from './routes/studentRate.routes.js'
+import { v1Router } from './routes/v1/index.js'
 
 // Process-level safety nets. A failed promise anywhere in the app (e.g. a
 // background job losing the database connection) is logged instead of
@@ -122,6 +123,7 @@ app.use('/api/messages', messageRouter)
 app.use('/api/groups', groupRouter)
 app.use('/api/payments', paymentRouter)
 app.use('/api/student-rate', studentRateRouter)
+app.use('/api/v1', v1Router)
 
 // Centralised error handler — keeps stack traces out of prod responses.
 app.use((err, _req, res, _next) => {

@@ -371,6 +371,9 @@ model Triage {
   creditKes           Int            @default(0)
   creditAppointmentId String?        @unique
   creditAppointment   Appointment?   @relation("TriageCreditAppointment", fields: [creditAppointmentId], references: [id], onDelete: SetNull)
+  clinicianPayoutKes  Int            @default(0)
+  payoutId            String?
+  payout              Payout?        @relation(fields: [payoutId], references: [id], onDelete: SetNull)
   startedAt           DateTime?
   completedAt         DateTime?
   createdAt           DateTime       @default(now())
@@ -383,6 +386,7 @@ model Triage {
   @@index([status, createdAt])
   @@index([clinicianId, status])
   @@index([userId])
+  @@index([payoutId])
   @@map("triages")
 }
 
@@ -677,6 +681,8 @@ model Payout {
   createdAt      DateTime     @default(now())
 
   appointments Appointment[]
+
+  triages Triage[]
 
   @@index([professionalId])
   @@map("payouts")
