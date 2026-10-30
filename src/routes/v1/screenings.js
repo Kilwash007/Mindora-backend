@@ -3,6 +3,7 @@ import { prisma } from '../../lib/prisma.js'
 import { requireAuth, requireRole } from '../../middleware/auth.js'
 import { audit } from '../../lib/audit.js'
 import { wrap, HttpError } from '../../lib/wrap.js'
+import { notifyTriageQueued } from '../../lib/triageNotify.js'
 import { scoreCheckIn } from '../../lib/screening.js'
 import { answersSchema, validateAnswersShape } from '../../lib/screeningValidation.js'
 import {
@@ -67,6 +68,9 @@ screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, re
     }
     return { checkIn, triage }
   })
+
+  // A free urgent triage has joined the queue: tell the clinician.
+  if (triage) notifyTriageQueued(triage.id)
 
   await audit({
     actorType: 'user',

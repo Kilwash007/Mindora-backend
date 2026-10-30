@@ -5,6 +5,7 @@ import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.j
 import { audit } from '../lib/audit.js'
 import { initiateStkPush, normalizeKenyanPhone } from '../lib/mpesa.js'
 import { assignClinician } from '../lib/triage.js'
+import { notifyTriageQueued } from '../lib/triageNotify.js'
 
 export const paymentRouter = Router()
 
@@ -267,6 +268,9 @@ paymentRouter.post('/callback', wrap(async (req, res) => {
     console.error('[mpesa callback] FAILED to record payment', payment.id, err, JSON.stringify(req.body))
     return ack()
   }
+
+  // A paid triage has joined the queue: tell the clinician. Never blocks the callback.
+  if (succeeded && payment.triageId) notifyTriageQueued(payment.triageId)
 
   await audit({
     actorType: 'system',

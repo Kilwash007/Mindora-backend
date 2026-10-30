@@ -60,3 +60,37 @@ export async function sendAppointmentReminderEmail(to, { professionalName, sched
     `,
   })
 }
+
+const escapeHtml = (value) =>
+  String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+// Tells a clinician a triage is waiting. It says nothing about the patient:
+// email is not a safe place for health information, so the details stay in
+// the portal. EMAIL_DISABLED=true skips sending (used by local tests).
+export async function sendTriageQueuedEmail(to, { name, urgent, assigned }) {
+  if (process.env.EMAIL_DISABLED === 'true') return
+
+  const base = (process.env.PRO_PORTAL_URL || '').replace(/\/$/, '')
+  const link = base
+    ? `<p><a href="${base}/pro/triage">Open the triage queue</a></p>`
+    : '<p>Sign in to your Mindora professional portal and open <strong>Triage</strong>.</p>'
+  const why = assigned
+    ? 'A new triage has been assigned to you.'
+    : 'Nobody is on call for triage right now, so this was sent to every clinician who can take it. Open the queue and choose <strong>Take this triage</strong>, or switch yourself on call.'
+
+  await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject: urgent ? 'Urgent: a triage is waiting' : 'A triage is waiting',
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px;">
+        <h2 style="color: #0f1e3d;">${urgent ? 'Urgent triage waiting' : 'A triage is waiting'}</h2>
+        <p>Hello ${escapeHtml(name)},</p>
+        <p>${why}</p>
+        ${urgent ? '<p><strong>This one is urgent. Please look at it as soon as you can.</strong></p>' : ''}
+        ${link}
+        <p style="color: #565d70; font-size: 13px;">Patients are told to expect a first reply within 2 hours, between 8am and 8pm EAT. No patient details are sent by email.</p>
+      </div>
+    `,
+  })
+}

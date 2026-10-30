@@ -6,6 +6,7 @@ import { audit } from '../../lib/audit.js'
 import { initiateStkPush, normalizeKenyanPhone } from '../../lib/mpesa.js'
 import { wrap, HttpError } from '../../lib/wrap.js'
 import { findTriageSponsor } from '../../lib/sponsorship.js'
+import { notifyTriageQueued } from '../../lib/triageNotify.js'
 import { getPriceRow, priceFor, isStudentEligible, professionalPayoutKes } from '../../lib/priceList.js'
 import {
   CRISIS_RESOURCES,
@@ -178,6 +179,9 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
     }
     throw err
   }
+
+  // Covered and urgent triages skip payment and join the queue straight away.
+  if (created.status === 'QUEUED') notifyTriageQueued(created.id)
 
   await audit({
     actorType: 'user',
