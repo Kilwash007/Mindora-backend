@@ -146,67 +146,131 @@ enum StudentRateStatus {
   REJECTED
 }
 
+// Fixed price list services (30 Oct 2026 pricing model).
+enum ServiceType {
+  TRIAGE
+  COUNSELLING
+  PSYCHOLOGY
+  PSYCHIATRY_INITIAL
+  PSYCHIATRY_FOLLOWUP
+}
+
+// The level of care a clinician assigns at the end of triage.
+enum CareLevel {
+  COUNSELLING
+  PSYCHOLOGY
+  PSYCHIATRY
+  EMERGENCY_REFERRAL
+}
+
+enum TriageStatus {
+  AWAITING_PAYMENT
+  QUEUED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum TriageUrgency {
+  ROUTINE
+  SOON
+  URGENT
+}
+
+enum Sex {
+  FEMALE
+  MALE
+  INTERSEX
+  PREFER_NOT_TO_SAY
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
 
 model User {
-  id                 String    @id @default(uuid())
-  email              String    @unique
-  passwordHash       String
-  fullName           String
-  consentAcceptedAt  DateTime?
-  consentVersion     String?
-  institutionId      String?
-  institution        Institution? @relation(fields: [institutionId], references: [id], onDelete: SetNull)
-  studentRateEligible Boolean  @default(false)
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  id                  String       @id @default(uuid())
+  email               String       @unique
+  passwordHash        String
+  fullName            String
+  consentAcceptedAt   DateTime?
+  consentVersion      String?
+  institutionId       String?
+  institution         Institution? @relation(fields: [institutionId], references: [id], onDelete: SetNull)
+  studentRateEligible Boolean      @default(false)
 
-  checkIns              CheckIn[]
-  referrals             Referral[]
-  appointments          Appointment[]
-  auditLogs             AuditLog[]
-  reviews               Review[]
-  sentMessages           Message[] @relation("MessagesSentByUser")
-  groupMemberships       GroupMembership[]
+  // Registration details (DHA / MOH 204A style). Optional in the database;
+  // the app asks for them at triage, not at sign-up.
+  phone                 String?
+  dateOfBirth           DateTime? @db.Date
+  sex                   Sex?
+  county                String?
+  nationalIdNumber      String?
+  nextOfKinName         String?
+  nextOfKinPhone        String?
+  nextOfKinRelationship String?
+
+  // Soft delete. Set instead of removing the row once the deletion flow
+  // is switched over (a separate step after this migration).
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  checkIns                 CheckIn[]
+  referrals                Referral[]
+  appointments             Appointment[]
+  auditLogs                AuditLog[]
+  reviews                  Review[]
+  sentMessages             Message[]                 @relation("MessagesSentByUser")
+  groupMemberships         GroupMembership[]
   studentRateVerifications StudentRateVerification[]
+  triages                  Triage[]
 
   @@map("users")
 }
 
 model Professional {
-  id                  String            @id @default(uuid())
-  email               String            @unique
+  id                  String           @id @default(uuid())
+  email               String           @unique
   passwordHash        String
   fullName            String
   type                ProfessionalType
   bio                 String?
   qualifications      String[]
   focusAreas          String[]
-  languages            String[]
-  yearsExperience     Int               @default(0)
+  languages           String[]
+  yearsExperience     Int              @default(0)
   location            String?
   feeKes              Int?
   studentRateFeeKes   Int?
   supervisorName      String?
-  onlineAvailable     Boolean           @default(true)
-  inPersonAvailable   Boolean           @default(false)
-  verified            Boolean           @default(false)
+  onlineAvailable     Boolean          @default(true)
+  inPersonAvailable   Boolean          @default(false)
+  verified            Boolean          @default(false)
   agreementAcceptedAt DateTime?
   agreementVersion    String?
-  createdAt           DateTime          @default(now())
-  updatedAt           DateTime          @updatedAt
 
-  referrals       Referral[]
-  appointments    Appointment[]
-  clinicalNotes   ClinicalNote[]
-  auditLogs       AuditLog[]
-  documents       ProfessionalDocument[]
-  reviews         Review[]
-  sentMessages    Message[] @relation("MessagesSentByProfessional")
-  supportGroups   SupportGroup[]
-  payouts         Payout[]
+  // Triage rota: only verified professionals marked on call receive new
+  // triages, assigned round-robin by who was assigned least recently.
+  onCallForTriage      Boolean   @default(false)
+  lastTriageAssignedAt DateTime?
+
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  referrals     Referral[]
+  appointments  Appointment[]
+  clinicalNotes ClinicalNote[]
+  auditLogs     AuditLog[]
+  documents     ProfessionalDocument[]
+  reviews       Review[]
+  sentMessages  Message[]              @relation("MessagesSentByProfessional")
+  supportGroups SupportGroup[]
+  payouts       Payout[]
+  triages       Triage[]
 
   @@map("professionals")
 }
@@ -219,40 +283,107 @@ model Admin {
   role         AdminRole @default(SUPPORT)
   createdAt    DateTime  @default(now())
 
-  auditLogs    AuditLog[]
+  auditLogs AuditLog[]
 
   @@map("admins")
 }
 
 // ---------------------------------------------------------------------------
 // Screening & wellbeing
+//
+// A screening is valid for 30 days from completedAt (computed in the app,
+// no column needed).
 // ---------------------------------------------------------------------------
 
 model CheckIn {
-  id         String    @id @default(uuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  riskLevel  RiskLevel
-  totalScore Int
-  maxScore   Int
-  completedAt DateTime @default(now())
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  riskLevel   RiskLevel
+  totalScore  Int
+  maxScore    Int
+  completedAt DateTime  @default(now())
 
-  answers    CheckInAnswer[]
-  referral   Referral?
+  answers  CheckInAnswer[]
+  referral Referral?
+  triage   Triage?
 
   @@index([userId, completedAt])
   @@map("check_ins")
 }
 
 model CheckInAnswer {
-  id         String   @id @default(uuid())
+  id         String  @id @default(uuid())
   checkInId  String
-  checkIn    CheckIn  @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  checkIn    CheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
   domain     String
   questionId String
   value      Int
 
   @@map("check_in_answers")
+}
+
+// ---------------------------------------------------------------------------
+// Price list
+//
+// One row per service, seeded by the migration and editable by a platform
+// admin. The STK Push amount is always computed from here on the server,
+// never sent by the client. studentPriceKes is empty until a student price
+// is decided; while empty, students pay priceKes.
+// ---------------------------------------------------------------------------
+
+model ServicePrice {
+  service         ServiceType @id
+  priceKes        Int
+  studentPriceKes Int?
+  payoutPercent   Int         @default(65)
+  active          Boolean     @default(true)
+  updatedAt       DateTime    @updatedAt
+
+  @@map("service_prices")
+}
+
+// ---------------------------------------------------------------------------
+// Triage
+//
+// One per screening. Paid (KES 500) unless the screening was ACUTE or PHQ-9
+// item 9 was positive, in which case isFree is true and it is never behind
+// a paywall. The clinician assigns a level of care and an ICD-10 code. A
+// paid triage's creditKes is applied once, to the first session booked,
+// recorded in creditAppointmentId.
+// ---------------------------------------------------------------------------
+
+model Triage {
+  id                  String         @id @default(uuid())
+  userId              String
+  user                User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkInId           String         @unique
+  checkIn             CheckIn        @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  clinicianId         String?
+  clinician           Professional?  @relation(fields: [clinicianId], references: [id], onDelete: SetNull)
+  status              TriageStatus   @default(AWAITING_PAYMENT)
+  isFree              Boolean        @default(false)
+  urgency             TriageUrgency?
+  careLevel           CareLevel?
+  icd10Code           String?
+  icd10Label          String?
+  summary             String?
+  creditKes           Int            @default(0)
+  creditAppointmentId String?        @unique
+  creditAppointment   Appointment?   @relation("TriageCreditAppointment", fields: [creditAppointmentId], references: [id], onDelete: SetNull)
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  appointments Appointment[] @relation("TriageAppointments")
+  payment      Payment?
+  messages     Message[]
+
+  @@index([status, createdAt])
+  @@index([clinicianId, status])
+  @@index([userId])
+  @@map("triages")
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +403,7 @@ model Referral {
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
-  flags          ReferralFlag[]
+  flags ReferralFlag[]
 
   @@index([professionalId, status])
   @@map("referrals")
@@ -287,6 +418,9 @@ model ReferralFlag {
   @@map("referral_flags")
 }
 
+// feeKes is what the patient is charged for this session. Under the fixed
+// price list it is listPriceKes minus triageCreditKes; older bookings made
+// with professional-set fees have serviceType and listPriceKes empty.
 model Appointment {
   id                      String            @id @default(uuid())
   userId                  String
@@ -299,6 +433,11 @@ model Appointment {
   feeKes                  Int
   platformFeeKes          Int               @default(0)
   isStudentRateBooking    Boolean           @default(false)
+  serviceType             ServiceType?
+  listPriceKes            Int?
+  triageCreditKes         Int               @default(0)
+  triageId                String?
+  triage                  Triage?           @relation("TriageAppointments", fields: [triageId], references: [id], onDelete: SetNull)
   meetingUrl              String?
   sponsoringInstitutionId String?
   sponsoringInstitution   Institution?      @relation(fields: [sponsoringInstitutionId], references: [id], onDelete: SetNull)
@@ -308,12 +447,14 @@ model Appointment {
   payout                  Payout?           @relation(fields: [payoutId], references: [id], onDelete: SetNull)
   createdAt               DateTime          @default(now())
 
-  review                  Review?
-  payment                 Payment?
+  review       Review?
+  payment      Payment?
+  creditTriage Triage?  @relation("TriageCreditAppointment")
 
   @@index([professionalId, scheduledFor])
   @@index([userId, scheduledFor])
   @@index([payoutId])
+  @@index([triageId])
   @@map("appointments")
 }
 
@@ -368,26 +509,26 @@ model Review {
 
 // ---------------------------------------------------------------------------
 // Messages — patient <-> professional, restricted to pairs who have (or
-// had) a real booked appointment together. senderRole disambiguates which
-// side sent it, since either a userId or a professionalId is set on the
-// sender side depending on who sent it, never both. This exists so
-// patients and professionals never need to exchange real contact info to
-// communicate outside a scheduled call — the original goal behind
-// building this at all.
+// had) a real booked appointment together, or a triage together. senderRole
+// disambiguates which side sent it. triageId is set on triage chat messages
+// so they stay separate from therapy messages between the same pair.
 // ---------------------------------------------------------------------------
 
 model Message {
-  id               String        @id @default(uuid())
-  userId           String
-  user             User          @relation("MessagesSentByUser", fields: [userId], references: [id], onDelete: Cascade)
-  professionalId   String
-  professional     Professional  @relation("MessagesSentByProfessional", fields: [professionalId], references: [id], onDelete: Cascade)
-  senderRole       String        // "user" | "professional" — who actually sent this message
-  content          String
-  readAt           DateTime?
-  createdAt        DateTime      @default(now())
+  id             String       @id @default(uuid())
+  userId         String
+  user           User         @relation("MessagesSentByUser", fields: [userId], references: [id], onDelete: Cascade)
+  professionalId String
+  professional   Professional @relation("MessagesSentByProfessional", fields: [professionalId], references: [id], onDelete: Cascade)
+  senderRole     String // "user" | "professional" — who actually sent this message
+  content        String
+  triageId       String?
+  triage         Triage?      @relation(fields: [triageId], references: [id], onDelete: SetNull)
+  readAt         DateTime?
+  createdAt      DateTime     @default(now())
 
   @@index([userId, professionalId, createdAt])
+  @@index([triageId, createdAt])
   @@map("messages")
 }
 
@@ -406,20 +547,20 @@ model Message {
 // ---------------------------------------------------------------------------
 
 model SupportGroup {
-  id             String       @id @default(uuid())
-  facilitatorId  String
-  facilitator    Professional @relation(fields: [facilitatorId], references: [id], onDelete: Cascade)
-  title          String
-  topic          GroupTopic
-  description    String
-  rules          String?
-  maxMembers     Int          @default(12)
-  status         GroupStatus  @default(ACTIVE)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id            String       @id @default(uuid())
+  facilitatorId String
+  facilitator   Professional @relation(fields: [facilitatorId], references: [id], onDelete: Cascade)
+  title         String
+  topic         GroupTopic
+  description   String
+  rules         String?
+  maxMembers    Int          @default(12)
+  status        GroupStatus  @default(ACTIVE)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
-  memberships    GroupMembership[]
-  messages       GroupMessage[]
+  memberships GroupMembership[]
+  messages    GroupMessage[]
 
   @@index([facilitatorId])
   @@index([status, topic])
@@ -440,8 +581,8 @@ model GroupMembership {
   joinedAt          DateTime?
   updatedAt         DateTime         @updatedAt
 
-  messages          GroupMessage[]
-  reports           GroupReport[]
+  messages GroupMessage[]
+  reports  GroupReport[]
 
   @@unique([groupId, userId])
   @@unique([groupId, pseudonym])
@@ -462,7 +603,7 @@ model GroupMessage {
   hiddenAt              DateTime?
   createdAt             DateTime         @default(now())
 
-  reports               GroupReport[]
+  reports GroupReport[]
 
   @@index([groupId, createdAt])
   @@map("group_messages")
@@ -485,30 +626,31 @@ model GroupReport {
 }
 
 // ---------------------------------------------------------------------------
-// Payments — one per appointment, tracking the patient's M-Pesa STK Push
-// transaction. PENDING is created the moment the push is sent to the
+// Payments — one M-Pesa STK Push transaction, for exactly one appointment
+// OR exactly one triage (enforced by a database CHECK constraint in the
+// migration). PENDING is created the moment the push is sent to the
 // patient's phone; PAID/FAILED are set only from Safaricom's callback,
 // never from the frontend, since the frontend cannot be trusted to know
-// whether money actually moved. rawCallback is kept for audit/debugging —
-// Safaricom's callback payloads vary and this is the only honest record
-// of exactly what they sent.
+// whether money actually moved. rawCallback is kept for audit/debugging.
 // ---------------------------------------------------------------------------
 
 model Payment {
-  id                String        @id @default(uuid())
-  appointmentId     String        @unique
-  appointment       Appointment   @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  phoneNumber       String
-  amountKes         Int
-  status            PaymentStatus @default(PENDING)
-  merchantRequestId String?
-  checkoutRequestId String?       @unique
+  id                 String        @id @default(uuid())
+  appointmentId      String?       @unique
+  appointment        Appointment?  @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  triageId           String?       @unique
+  triage             Triage?       @relation(fields: [triageId], references: [id], onDelete: Cascade)
+  phoneNumber        String
+  amountKes          Int
+  status             PaymentStatus @default(PENDING)
+  merchantRequestId  String?
+  checkoutRequestId  String?       @unique
   mpesaReceiptNumber String?
-  resultDesc        String?
-  rawCallback       Json?
-  paidAt            DateTime?
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  resultDesc         String?
+  rawCallback        Json?
+  paidAt             DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
   @@index([status])
   @@map("payments")
@@ -534,7 +676,7 @@ model Payout {
   paidAt         DateTime     @default(now())
   createdAt      DateTime     @default(now())
 
-  appointments   Appointment[]
+  appointments Appointment[]
 
   @@index([professionalId])
   @@map("payouts")
@@ -542,25 +684,24 @@ model Payout {
 
 // ---------------------------------------------------------------------------
 // Student Rate verification — a patient's self-serve path to the
-// discounted tier (KES 2,000 fee cap, 25% platform commission). Two
-// methods: a university email address, or an uploaded ID document
-// proving age 18-25 ("young adult"). Both go through the same admin
-// review queue as professional KYC, rather than being auto-approved —
-// a fake university email or a borrowed ID are both real risks worth
-// a human check, same reasoning as professional document review.
+// discounted tier. Two methods: a university email address, or an uploaded
+// ID document proving age 18-25 ("young adult"). Both go through the same
+// admin review queue as professional KYC, rather than being auto-approved.
+// Under the fixed price list, an approved student pays
+// ServicePrice.studentPriceKes where one is set.
 // ---------------------------------------------------------------------------
 
 model StudentRateVerification {
-  id          String             @id @default(uuid())
+  id          String            @id @default(uuid())
   userId      String
-  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   method      StudentRateMethod
-  evidence    String             // university email address, for STUDENT_EMAIL
-  filePath    String?            // R2 object key for the ID document, for YOUNG_ADULT_ID
-  status      StudentRateStatus  @default(PENDING)
+  evidence    String // university email address, for STUDENT_EMAIL
+  filePath    String? // R2 object key for the ID document, for YOUNG_ADULT_ID
+  status      StudentRateStatus @default(PENDING)
   reviewNotes String?
   reviewedAt  DateTime?
-  createdAt   DateTime           @default(now())
+  createdAt   DateTime          @default(now())
 
   @@index([userId])
   @@index([status])
@@ -592,25 +733,26 @@ model SafetyAlert {
 // example, 50 places in a university pilot). sponsoredSessionsPerMember
 // caps how many sessions the institution covers for each member (for
 // example, 2 free sessions). Both are optional: null means unlimited.
+// Coverage applies to the session balance after any triage credit.
 // ---------------------------------------------------------------------------
 
 model Institution {
-  id                         String             @id @default(uuid())
+  id                         String            @id @default(uuid())
   name                       String
   type                       InstitutionType
   contactName                String?
   contactEmail               String?
-  status                     InstitutionStatus  @default(PENDING)
+  status                     InstitutionStatus @default(PENDING)
   notes                      String?
-  coveragePercent            Int                @default(0)
-  enrollmentCode             String             @unique
+  coveragePercent            Int               @default(0)
+  enrollmentCode             String            @unique
   memberLimit                Int?
   sponsoredSessionsPerMember Int?
-  createdAt                  DateTime           @default(now())
-  updatedAt                  DateTime           @updatedAt
+  createdAt                  DateTime          @default(now())
+  updatedAt                  DateTime          @updatedAt
 
-  members                User[]
-  sponsoredAppointments  Appointment[]
+  members               User[]
+  sponsoredAppointments Appointment[]
 
   @@map("institutions")
 }
@@ -637,13 +779,13 @@ model LoginOtp {
 // ---------------------------------------------------------------------------
 
 model RefreshToken {
-  id         String    @id @default(uuid())
-  tokenHash  String    @unique
-  role       String
-  accountId  String
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  createdAt  DateTime  @default(now())
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  role      String
+  accountId String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
 
   @@index([accountId, role])
   @@map("refresh_tokens")
@@ -654,13 +796,13 @@ model RefreshToken {
 // ---------------------------------------------------------------------------
 
 model AccountDeletionRequest {
-  id               String                 @id @default(uuid())
+  id               String                @id @default(uuid())
   role             String
   accountId        String
   email            String
   reason           String?
-  status           DeletionRequestStatus  @default(PENDING)
-  requestedAt      DateTime               @default(now())
+  status           DeletionRequestStatus @default(PENDING)
+  requestedAt      DateTime              @default(now())
   processedAt      DateTime?
   processedByEmail String?
 
@@ -691,6 +833,11 @@ model AuditLog {
   @@index([createdAt])
   @@map("audit_logs")
 }
+
+// ---------------------------------------------------------------------------
+// Password reset
+// ---------------------------------------------------------------------------
+
 model PasswordReset {
   id         String    @id @default(uuid())
   email      String
