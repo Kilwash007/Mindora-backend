@@ -14,6 +14,7 @@ import {
   professionalPayoutKes,
 } from '../../lib/priceList.js'
 import { CARE_LEVEL_SERVICE, SERVICE_PROFESSIONAL_TYPES } from '../../lib/triage.js'
+import { holdExpiresAt } from '../../lib/holds.js'
 
 export const bookingRouter = Router()
 
@@ -236,5 +237,6 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
     serviceLabel: terms.serviceLabel,
     amountDueKes,
     paymentRequired: amountDueKes > 0,
+    holdExpiresAt: amountDueKes > 0 ? holdExpiresAt(appointment.createdAt) : null,
   })
 }))

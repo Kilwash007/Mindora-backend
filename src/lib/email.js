@@ -145,3 +145,33 @@ export async function sendTriageOverdueEmail(to, { name, urgent, stage }) {
     `,
   })
 }
+
+// A session whose balance was not paid in time. It says nothing about why the
+// person was booking: only who, when, and that nothing was charged.
+// EMAIL_DISABLED=true skips sending (used by local tests).
+export async function sendSlotReleasedEmail(to, { professionalName, scheduledFor, holdMinutes }) {
+  if (process.env.EMAIL_DISABLED === 'true') return
+
+  const when = new Date(scheduledFor).toLocaleString('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  const held = holdMinutes % 60 === 0 ? `${holdMinutes / 60} hour${holdMinutes === 60 ? '' : 's'}` : `${holdMinutes} minutes`
+
+  await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject: 'Your held session was released',
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px;">
+        <h2 style="color: #0f1e3d;">Your held session was released</h2>
+        <p>Your session with ${escapeHtml(professionalName)} on ${when} (East Africa Time) was released because the balance was not paid within ${held} of booking.</p>
+        <p>Nothing was charged. If you had a triage credit or a covered session, it is available again, and you can book again at any time from your Mindora account.</p>
+      </div>
+    `,
+  })
+}

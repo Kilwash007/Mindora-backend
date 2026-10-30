@@ -205,6 +205,15 @@ async function onTriagePaid(tx, payment) {
 
 async function onAppointmentPaid(tx, payment) {
   const appointment = await tx.appointment.findUnique({ where: { id: payment.appointmentId } })
+  if (appointment && appointment.status === 'CANCELLED') {
+    // The slot was released (or cancelled) before this payment arrived. The
+    // money is real, so say so loudly: it needs a refund or a rebooking by hand.
+    console.error('[mpesa callback] PAID FOR A CANCELLED APPOINTMENT: refund or rebook by hand.', {
+      paymentId: payment.id,
+      appointmentId: appointment.id,
+      amountKes: payment.amountKes,
+    })
+  }
   if (appointment && appointment.type === 'ONLINE' && !appointment.meetingUrl && appointment.status !== 'CANCELLED') {
     await tx.appointment.update({
       where: { id: appointment.id },

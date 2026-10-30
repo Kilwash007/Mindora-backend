@@ -18,6 +18,7 @@ import { aiRouter } from './routes/ai.routes.js'
 import { accountRouter } from './routes/account.routes.js'
 import { startAppointmentReminderJob } from './jobs/appointmentReminders.js'
 import { startTriageEscalationJob } from './jobs/triageEscalations.js'
+import { startReleaseUnpaidSlotsJob } from './jobs/releaseUnpaidSlots.js'
 import { reviewRouter } from './routes/review.routes.js'
 import { messageRouter } from './routes/message.routes.js'
 import { groupRouter } from './routes/group.routes.js'
@@ -139,4 +140,5 @@ app.listen(port, () => {
   console.log(`Mindora API listening on http://localhost:${port} [${process.env.NODE_ENV}]`)
   startAppointmentReminderJob()
   startTriageEscalationJob()
+  startReleaseUnpaidSlotsJob()
 })
