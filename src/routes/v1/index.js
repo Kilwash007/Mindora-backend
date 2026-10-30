@@ -5,6 +5,7 @@ import { meRouter } from './me.js'
 import { triageRouter } from './triage.js'
 import { bookingRouter } from './booking.js'
 import { clinicianRouter } from './clinician.js'
+import { adminTriageRouter } from './adminTriage.js'
 
 // Versioned routes, so the web portals, WhatsApp and USSD can all use the
 // same endpoints later.
@@ -16,3 +17,4 @@ v1Router.use('/me', meRouter)
 v1Router.use('/triage', triageRouter)
 v1Router.use('/appointments', bookingRouter)
 v1Router.use('/clinician', clinicianRouter)
+v1Router.use('/admin/triage', adminTriageRouter)
