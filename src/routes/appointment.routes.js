@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole, requireAgreement } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { calculatePlatformFeeKes } from '../lib/pricing.js'
+import { PUBLIC_PROFESSIONAL_SELECT } from '../lib/safeSelects.js'
 
 export const appointmentRouter = Router()
 
@@ -203,10 +204,11 @@ appointmentRouter.patch(
 )
 
 // Patient's own appointments — not gated by the professional agreement.
+// The professional comes back with public fields only.
 appointmentRouter.get('/mine', requireAuth, requireRole('user'), async (req, res) => {
   const appointments = await prisma.appointment.findMany({
     where: { userId: req.auth.id },
-    include: { professional: true },
+    include: { professional: { select: PUBLIC_PROFESSIONAL_SELECT } },
     orderBy: { scheduledFor: 'desc' },
   })
   res.json(appointments)

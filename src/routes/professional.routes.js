@@ -6,21 +6,22 @@ import { audit } from '../lib/audit.js'
 import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 import { STUDENT_RATE_FEE_CAP_KES } from '../lib/pricing.js'
 import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
+import { PUBLIC_PROFESSIONAL_SELECT, stripSecrets } from '../lib/safeSelects.js'
 
 export const professionalRouter = Router()
 
 // Any authenticated person (user or professional) can browse the directory.
-// Only verified professionals are ever listed publicly. When the requester
-// is Student Rate-eligible — a verified student, or a member of an active
+// Only verified, non-deleted professionals are ever listed, and only their
+// public fields (never email or password hash). When the requester is
+// Student Rate-eligible — a verified student, or a member of an active
 // university through its enrollment code — professionals who've opted into
 // the tier (studentRateFeeKes set) and are less experienced/junior
-// (yearsExperience < 3 — the practical stand-in for "freelance," since
-// Mindora doesn't track employment type as its own concept) are sorted
-// first. This is a soft preference, not a filter — every verified
-// professional still appears, eligible or not.
+// (yearsExperience < 3) are sorted first. This is a soft preference, not a
+// filter — every verified professional still appears.
 professionalRouter.get('/', requireAuth, async (req, res) => {
   const professionals = await prisma.professional.findMany({
-    where: { verified: true },
+    where: { verified: true, deletedAt: null },
+    select: PUBLIC_PROFESSIONAL_SELECT,
     orderBy: { createdAt: 'asc' },
   })
 
@@ -116,14 +117,13 @@ const updateProfileSchema = z.object({
   inPersonAvailable: z.boolean().optional(),
 })
 
-// A professional's own full profile — unlike the public directory (which
-// only ever shows verified professionals), this returns their own record
-// regardless of verification status, since they need to see and edit it
-// before they're approved.
+// A professional's own profile, regardless of verification status, since
+// they need to see and edit it before they're approved. Everything except
+// the password hash.
 professionalRouter.get('/me/profile', requireAuth, requireRole('professional'), async (req, res) => {
   const professional = await prisma.professional.findUnique({ where: { id: req.auth.id } })
   if (!professional) return res.status(401).json({ error: 'Authentication required.' })
-  res.json(professional)
+  res.json(stripSecrets(professional))
 })
 
 professionalRouter.patch('/me/profile', requireAuth, requireRole('professional'), async (req, res) => {
@@ -134,11 +134,8 @@ professionalRouter.patch('/me/profile', requireAuth, requireRole('professional')
   if (!current) return res.status(401).json({ error: 'Authentication required.' })
 
   // Qualifications and professional type are the claims the "Verified by
-  // Mindora" badge actually vouches for — they're what the reviewed KYC
-  // documents (degree certificate, license) substantiate. Changing either
-  // after verification without re-review would let a claim go unchecked
-  // while the verified badge kept showing, so any real change automatically
-  // un-verifies the account until admin reviews it again.
+  // Mindora" badge actually vouches for. Changing either after verification
+  // automatically un-verifies the account until admin reviews it again.
   const data = { ...parsed.data }
   let credentialsChanged = false
 
@@ -169,14 +166,15 @@ professionalRouter.patch('/me/profile', requireAuth, requireRole('professional')
     resourceId: req.auth.id,
   })
 
-  res.json(updated)
+  res.json(stripSecrets(updated))
 })
 
 professionalRouter.get('/:id', requireAuth, async (req, res) => {
-  const professional = await prisma.professional.findUnique({
-    where: { id: req.params.id },
+  const professional = await prisma.professional.findFirst({
+    where: { id: req.params.id, verified: true, deletedAt: null },
+    select: PUBLIC_PROFESSIONAL_SELECT,
   })
-  if (!professional || !professional.verified) {
+  if (!professional) {
     return res.status(404).json({ error: 'Professional not found.' })
   }
   res.json(professional)
