@@ -376,6 +376,8 @@ model Triage {
   payout                  Payout?        @relation(fields: [payoutId], references: [id], onDelete: SetNull)
   sponsoringInstitutionId String?
   sponsoringInstitution   Institution?   @relation(fields: [sponsoringInstitutionId], references: [id], onDelete: SetNull)
+  reminderSentAt          DateTime?
+  escalatedAt             DateTime?
   startedAt               DateTime?
   completedAt             DateTime?
   createdAt               DateTime       @default(now())

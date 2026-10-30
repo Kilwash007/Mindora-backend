@@ -94,3 +94,54 @@ export async function sendTriageQueuedEmail(to, { name, urgent, assigned }) {
     `,
   })
 }
+
+const OVERDUE_COPY = {
+  reminder: {
+    subject: 'Reminder: a triage is waiting for your first reply',
+    lead: 'A triage assigned to you has not had a first reply yet.',
+  },
+  unassigned: {
+    subject: 'A triage is still waiting',
+    lead: 'A triage has been waiting and nobody has taken it yet. Open the queue and choose <strong>Take this triage</strong>.',
+  },
+  released: {
+    subject: 'Overdue: a triage needs a clinician now',
+    lead: 'A triage has waited too long for a first reply and has been released to every eligible clinician. Please open the queue and choose <strong>Take this triage</strong>.',
+  },
+  admin: {
+    subject: 'Triage overdue: needs attention',
+    lead: 'A triage missed its reply window and has been released to all eligible clinicians. Please check that someone has taken it, and contact a clinician directly if nobody has.',
+  },
+}
+
+// A triage nobody has answered in time. Like the "waiting" email, it carries
+// no patient details. EMAIL_DISABLED=true skips sending (used by local tests).
+export async function sendTriageOverdueEmail(to, { name, urgent, stage }) {
+  if (process.env.EMAIL_DISABLED === 'true') return
+
+  const copy = OVERDUE_COPY[stage]
+  if (!copy) throw new Error(`Unknown triage email stage: ${stage}`)
+
+  const base = (process.env.PRO_PORTAL_URL || '').replace(/\/$/, '')
+  const link =
+    stage === 'admin'
+      ? ''
+      : base
+        ? `<p><a href="${base}/pro/triage">Open the triage queue</a></p>`
+        : '<p>Sign in to your Mindora professional portal and open <strong>Triage</strong>.</p>'
+
+  await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject: (urgent ? 'Urgent: ' : '') + copy.subject,
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px;">
+        <h2 style="color: #0f1e3d;">${urgent ? 'Urgent: ' : ''}${copy.subject}</h2>
+        <p>Hello ${escapeHtml(name)},</p>
+        <p>${copy.lead}</p>
+        ${link}
+        <p style="color: #565d70; font-size: 13px;">Patients are told to expect a first reply within 2 hours, between 8am and 8pm EAT. No patient details are sent by email.</p>
+      </div>
+    `,
+  })
+}
