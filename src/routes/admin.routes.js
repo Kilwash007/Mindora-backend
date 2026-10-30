@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
+import { stripSecrets } from '../lib/safeSelects.js'
 
 export const adminRouter = Router()
 
@@ -168,6 +169,8 @@ adminRouter.get(
   }
 )
 
+// Admins see every professional field (email included, for KYC follow-up)
+// except the password hash.
 adminRouter.get(
   '/professionals',
   requireAuth,
@@ -184,7 +187,7 @@ adminRouter.get(
       resourceType: 'professional',
     })
 
-    res.json(professionals)
+    res.json(professionals.map(stripSecrets))
   }
 )
 
@@ -214,7 +217,7 @@ adminRouter.patch(
       resourceId: professional.id,
     })
 
-    res.json(updated)
+    res.json(stripSecrets(updated))
   }
 )
 
@@ -392,6 +395,7 @@ adminRouter.patch(
     // handle check-ins, referrals, appointments, and — for professionals —
     // documents. Clinical notes referencing this userId are deliberately
     // left in place; see the ClinicalNote comment in schema.prisma.
+    // (Switching this to soft delete is a separate, planned step.)
     if (request.role === 'user') {
       await prisma.user.delete({ where: { id: request.accountId } }).catch(() => null)
     } else {
