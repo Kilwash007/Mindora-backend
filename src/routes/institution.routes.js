@@ -27,6 +27,7 @@ const createSchema = z.object({
   memberLimit: limitField,
   sponsoredSessionsPerMember: limitField,
   coversTriage: z.boolean().optional(),
+  requiresStudentProof: z.boolean().optional(),
 })
 
 institutionRouter.get('/', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
@@ -72,6 +73,7 @@ const updateSchema = z.object({
   memberLimit: limitField,
   sponsoredSessionsPerMember: limitField,
   coversTriage: z.boolean().optional(),
+  requiresStudentProof: z.boolean().optional(),
 })
 
 institutionRouter.patch('/:id', requireAuth, requireAdminRole('PLATFORM_ADMIN'), async (req, res) => {
@@ -138,6 +140,7 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
     sponsoredAppointmentCount,
     sponsoredTriageCount,
     coversTriage: institution.coversTriage,
+    requiresStudentProof: institution.requiresStudentProof,
     totalCoveredKes: coverageSum._sum.institutionCoveredKes ?? 0,
   })
 })

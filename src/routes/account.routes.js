@@ -206,6 +206,22 @@ accountRouter.get('/institution', requireAuth, requireRole('user'), async (req, 
 
   const triageCoveredUsed = user.institution.coversTriage ? await hasUsedCoveredTriage(req.auth.id) : false
 
+  // When the programme asks for student proof: APPROVED once an admin has
+  // approved it, otherwise the state of their latest request (or NONE).
+  let proofStatus = null
+  if (user.institution.requiresStudentProof) {
+    if (user.studentRateEligible) {
+      proofStatus = 'APPROVED'
+    } else {
+      const latest = await prisma.studentRateVerification.findFirst({
+        where: { userId: req.auth.id },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true },
+      })
+      proofStatus = latest?.status ?? 'NONE'
+    }
+  }
+
   res.json({
     name: user.institution.name,
     type: user.institution.type,
@@ -215,5 +231,7 @@ accountRouter.get('/institution', requireAuth, requireRole('user'), async (req, 
     sponsoredSessionsUsed,
     coversTriage: user.institution.coversTriage,
     triageCoveredUsed,
+    requiresStudentProof: user.institution.requiresStudentProof,
+    proofStatus,
   })
 })

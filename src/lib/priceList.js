@@ -39,8 +39,11 @@ export function professionalPayoutKes(basePriceKes, payoutPercent) {
 export async function isStudentEligible(userId, client = prisma) {
   const user = await client.user.findUnique({
     where: { id: userId },
-    select: { studentRateEligible: true, institution: { select: { type: true, status: true } } },
+    select: { studentRateEligible: true, institution: { select: { type: true, status: true, requiresStudentProof: true } } },
   })
-  const universityMember = user?.institution?.type === 'UNIVERSITY' && user?.institution?.status === 'ACTIVE'
+  // Belonging to a university programme counts as being a student, unless the
+  // programme asks for proof: then only an approved proof does.
+  const universityMember =
+    user?.institution?.type === 'UNIVERSITY' && user?.institution?.status === 'ACTIVE' && !user?.institution?.requiresStudentProof
   return Boolean(user?.studentRateEligible || universityMember)
 }

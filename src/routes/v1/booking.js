@@ -138,7 +138,9 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
   const user = await prisma.user.findUnique({ where: { id: userId }, include: { institution: true } })
   const institution = user?.institution
   let sponsorshipAvailable = false
-  if (institution && institution.status === 'ACTIVE' && institution.coveragePercent > 0) {
+  // A programme that asks for student proof only covers people whose proof is approved.
+  const proofOk = !institution?.requiresStudentProof || Boolean(user?.studentRateEligible)
+  if (institution && institution.status === 'ACTIVE' && institution.coveragePercent > 0 && proofOk) {
     if (institution.sponsoredSessionsPerMember == null) {
       sponsorshipAvailable = true
     } else {

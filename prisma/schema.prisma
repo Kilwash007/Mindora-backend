@@ -760,6 +760,7 @@ model Institution {
   memberLimit                Int?
   sponsoredSessionsPerMember Int?
   coversTriage               Boolean           @default(false)
+  requiresStudentProof       Boolean           @default(false)
   createdAt                  DateTime          @default(now())
   updatedAt                  DateTime          @updatedAt
 

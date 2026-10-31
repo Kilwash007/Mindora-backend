@@ -16,6 +16,7 @@ import { sendOtpEmail, sendPasswordResetEmail } from '../lib/email.js'
 import { requireAuth } from '../middleware/auth.js'
 import { CURRENT_CONSENT_VERSION } from '../lib/consent.js'
 import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
+import { findEnrollableInstitution } from '../lib/enroll.js'
 
 export const authRouter = Router()
 
@@ -31,6 +32,8 @@ const userRegisterSchema = registerSchema.extend({
   consent: z.literal(true, {
     errorMap: () => ({ message: 'You must accept the privacy consent to create an account.' }),
   }),
+  // An optional pilot or promo code that links the new account to its programme.
+  enrollmentCode: z.string().trim().max(40).optional(),
 })
 
 // Professionals choose their professional type at sign-up. It defaults to
@@ -67,9 +70,18 @@ authRouter.post('/user/register', registerLimiter, async (req, res) => {
   const parsed = userRegisterSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  const { fullName, email, password } = parsed.data
+  const { fullName, email, password, enrollmentCode } = parsed.data
   const existing = await prisma.user.findUnique({ where: { email } })
   if (existing) return res.status(409).json({ error: 'An account with this email already exists.' })
+
+  // A wrong or full code is refused before the account is created, so the
+  // person can correct it or leave it blank rather than join half-way.
+  let institution = null
+  if (enrollmentCode) {
+    const found = await findEnrollableInstitution(enrollmentCode)
+    if (found.error) return res.status(found.status).json({ error: found.error, code: 'CODE_INVALID' })
+    institution = found.institution
+  }
 
   const user = await prisma.user.create({
     data: {
@@ -78,11 +90,18 @@ authRouter.post('/user/register', registerLimiter, async (req, res) => {
       passwordHash: await hashPassword(password),
       consentAcceptedAt: new Date(),
       consentVersion: CURRENT_CONSENT_VERSION,
+      institutionId: institution?.id ?? null,
     },
   })
 
   const session = await issueSession({ id: user.id, role: 'user' })
-  res.status(201).json({ ...session, user: { id: user.id, fullName: user.fullName, email: user.email } })
+  res.status(201).json({
+    ...session,
+    user: { id: user.id, fullName: user.fullName, email: user.email },
+    institution: institution
+      ? { name: institution.name, coversTriage: institution.coversTriage, requiresStudentProof: institution.requiresStudentProof }
+      : null,
+  })
 })
 
 authRouter.post('/user/login', loginLimiter, async (req, res) => {
