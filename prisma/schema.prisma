@@ -865,3 +865,33 @@ model PasswordReset {
   @@index([email, role])
   @@map("password_resets")
 }
+
+// ---------------------------------------------------------------------------
+// KCB Instant Payment Notifications (IPN) — one row per notification KCB
+// sends for a payment to Mindora's till. Signed by KCB (SHA256withRSA over the
+// raw body). Used to reconcile: matchedPaymentId links it to the Payment whose
+// M-Pesa receipt matches. It never marks a payment PAID by itself; the STK
+// callback does that, and this is the bank's independent confirmation.
+// ---------------------------------------------------------------------------
+
+model KcbIpnNotification {
+  id                String   @id @default(uuid())
+  transactionId     String   @unique
+  messageId         String?
+  businessKey       String?
+  debitMsisdn       String?
+  amountKes         Int?
+  currency          String?
+  transactionType   String?
+  narration         String?
+  transactionDate   String?
+  signatureVerified Boolean  @default(false)
+  matchedPaymentId  String?
+  amountMatches     Boolean?
+  rawBody           Json
+  createdAt         DateTime @default(now())
+
+  @@index([matchedPaymentId])
+  @@index([createdAt])
+  @@map("kcb_ipn_notifications")
+}

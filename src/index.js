@@ -26,6 +26,7 @@ import { groupRouter } from './routes/group.routes.js'
 import { paymentRouter } from './routes/payment.routes.js'
 import { studentRateRouter } from './routes/studentRate.routes.js'
 import { v1Router } from './routes/v1/index.js'
+import { kcbIpnRouter } from './routes/kcbIpn.routes.js'
 
 // Process-level safety nets. A failed promise anywhere in the app (e.g. a
 // background job losing the database connection) is logged instead of
@@ -100,7 +101,16 @@ app.use(
     credentials: true,
   })
 )
-app.use(express.json())
+// rawBody keeps the exact bytes of each JSON request, because KCB signs the
+// raw body of its payment notifications and the signature must be checked
+// against those bytes, not against re-serialised JSON.
+app.use(
+  express.json({
+    verify(req, _res, buf) {
+      req.rawBody = buf
+    },
+  })
+)
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 app.use(attachAuth)
 app.use('/api', apiLimiter)
@@ -124,6 +134,7 @@ app.use('/api/account', accountRouter)
 app.use('/api/reviews', reviewRouter)
 app.use('/api/messages', messageRouter)
 app.use('/api/groups', groupRouter)
+app.use('/api/payments/kcb', kcbIpnRouter)
 app.use('/api/payments', paymentRouter)
 app.use('/api/student-rate', studentRateRouter)
 app.use('/api/v1', v1Router)
