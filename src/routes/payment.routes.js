@@ -16,6 +16,14 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // record that has already been replaced.
 const PAYMENT_RETRY_GUARD_MS = 2 * 60 * 1000
 
+// 254712345678 -> 07•• ••• 678, so the patient can see which phone the prompt
+// went to without the full number being shown on screen.
+function maskPhone(phone) {
+  const d = String(phone || '')
+  if (d.length < 12) return null
+  return `0${d.slice(3, 4)}\u2022\u2022 \u2022\u2022\u2022 ${d.slice(-3)}`
+}
+
 // A completed appointment is owed to the professional (once not yet in a
 // payout) when either the patient's M-Pesa payment is PAID, or an
 // institution covered the whole fee so the patient never needed to pay —
@@ -53,9 +61,12 @@ async function findOwedTriages(clinicianId) {
 // Patient: start a payment for one of their own appointments
 // ---------------------------------------------------------------------------
 
+// phoneNumber is optional: without it the prompt goes to the phone saved on
+// the patient's registration, so the app can send it as soon as a session is
+// booked. A number typed here is saved to the registration if none is saved.
 const initiateSchema = z.object({
   appointmentId: z.string().uuid(),
-  phoneNumber: z.string().min(9),
+  phoneNumber: z.string().min(9).optional(),
 })
 
 paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (req, res) => {
@@ -93,9 +104,13 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
     return res.status(400).json({ error: 'There is nothing to pay for this appointment.' })
   }
 
-  const normalizedPhone = normalizeKenyanPhone(phoneNumber)
-  if (!normalizedPhone) {
+  const user = await prisma.user.findUnique({ where: { id: req.auth.id }, select: { phone: true } })
+  const normalizedPhone = phoneNumber ? normalizeKenyanPhone(phoneNumber) : normalizeKenyanPhone(user?.phone || '')
+  if (phoneNumber && !normalizedPhone) {
     return res.status(400).json({ error: 'Please enter a valid Kenyan phone number.' })
+  }
+  if (!normalizedPhone) {
+    return res.status(400).json({ error: 'Please enter the M-Pesa number to send the prompt to.', code: 'PHONE_REQUIRED' })
   }
 
   const callbackUrl = `${process.env.PUBLIC_API_URL}/api/payments/callback`
@@ -103,6 +118,10 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
     // Fails loudly rather than silently sending Safaricom an unreachable
     // localhost URL it can never call back to.
     return res.status(500).json({ error: 'Payments are not configured on this server yet.' })
+  }
+
+  if (phoneNumber && !user?.phone) {
+    await prisma.user.update({ where: { id: req.auth.id }, data: { phone: normalizedPhone } })
   }
 
   let stkResult
@@ -151,7 +170,12 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
     metadata: { appointmentId, amountKes: amountDue },
   })
 
-  res.status(201).json({ status: payment.status, checkoutRequestId: payment.checkoutRequestId })
+  res.status(201).json({
+    status: payment.status,
+    checkoutRequestId: payment.checkoutRequestId,
+    amountKes: amountDue,
+    phoneMasked: maskPhone(normalizedPhone),
+  })
 }))
 
 // Patient polls this while waiting for the STK push to be answered.
@@ -173,6 +197,7 @@ paymentRouter.get('/appointment/:appointmentId', requireAuth, requireRole('user'
     amountKes: appointment.payment.amountKes,
     mpesaReceiptNumber: appointment.payment.mpesaReceiptNumber,
     resultDesc: appointment.payment.resultDesc,
+    phoneMasked: maskPhone(appointment.payment.phoneNumber),
   })
 }))
 

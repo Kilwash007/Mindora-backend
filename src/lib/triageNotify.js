@@ -5,8 +5,10 @@ import { CURRENT_AGREEMENT_VERSION } from './agreement.js'
 
 // Who should be told that a triage is waiting.
 //   - If a clinician is assigned, only that clinician.
-//   - If nobody was assigned (nobody on call), every verified clinician who
-//     could take it, so a patient never waits unseen.
+//   - Otherwise every clinician who is on call, all at once; the first to
+//     take it in the queue gets it.
+//   - If nobody is on call, every verified clinician who could take it, so a
+//     patient never waits unseen.
 // Nothing is returned for a triage that is not waiting in the queue. The
 // notices carry no patient details; the email only says a triage is waiting.
 export async function buildTriageNotices(triageId, client = prisma) {
@@ -27,17 +29,27 @@ export async function buildTriageNotices(triageId, client = prisma) {
     return [{ to: triage.clinician.email, name: triage.clinician.fullName, urgent, assigned: true }]
   }
 
-  const clinicians = await client.professional.findMany({
-    where: {
-      verified: true,
-      deletedAt: null,
-      type: { in: TRIAGE_CLINICIAN_TYPES },
-      agreementVersion: CURRENT_AGREEMENT_VERSION,
-      agreementAcceptedAt: { not: null },
-    },
+  const eligible = {
+    verified: true,
+    deletedAt: null,
+    type: { in: TRIAGE_CLINICIAN_TYPES },
+    agreementVersion: CURRENT_AGREEMENT_VERSION,
+    agreementAcceptedAt: { not: null },
+  }
+
+  const onCall = await client.professional.findMany({
+    where: { ...eligible, onCallForTriage: true },
     select: { email: true, fullName: true },
   })
-  return clinicians.map((c) => ({ to: c.email, name: c.fullName, urgent, assigned: false }))
+  if (onCall.length > 0) {
+    return onCall.map((c) => ({ to: c.email, name: c.fullName, urgent, assigned: false, onCall: true }))
+  }
+
+  const clinicians = await client.professional.findMany({
+    where: eligible,
+    select: { email: true, fullName: true },
+  })
+  return clinicians.map((c) => ({ to: c.email, name: c.fullName, urgent, assigned: false, onCall: false }))
 }
 
 // Fire and forget: an email problem is logged and never breaks a payment

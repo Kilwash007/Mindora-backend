@@ -4,8 +4,8 @@ import { addServiceMinutes } from '../lib/serviceHours.js'
 import { TRIAGE_CLINICIAN_TYPES } from '../lib/triage.js'
 import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 
-// Backstop for the promise to patients: a first reply within 2 hours between
-// 8am and 8pm EAT. The clinician is emailed when a triage is queued
+// Backstop for the promise to patients: a first reply within
+// TRIAGE_RESPONSE_MINUTES (lib/triage.js, default 60) between 8am and 8pm EAT. The clinician is emailed when a triage is queued
 // (triageNotify.js); this job is what happens if nobody answers.
 //
 //   remind   - the assigned clinician is reminded (everyone, if nobody has it)
@@ -17,11 +17,12 @@ import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 // the triage joined the queue. An urgent triage runs on a much shorter clock.
 // "Waiting" means no clinician has replied yet (status QUEUED).
 export const TIMINGS = {
-  routine: { remind: 90, escalate: 120 },
-  urgent: { remind: 30, escalate: 60 },
+  routine: { remind: 15, escalate: 30 },
+  urgent: { remind: 5, escalate: 15 },
 }
 
-const CHECK_INTERVAL_MS = 5 * 60 * 1000
+// Checked every 2 minutes so the 5-minute urgent reminder is not late.
+const CHECK_INTERVAL_MS = 2 * 60 * 1000
 
 const isUrgent = (t) => Boolean(t.isFree) || t.urgency === 'URGENT'
 

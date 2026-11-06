@@ -26,6 +26,14 @@ export const triageRouter = Router()
 // record that has already been replaced.
 const PAYMENT_RETRY_GUARD_MS = 2 * 60 * 1000
 
+// 254712345678 -> 07•• ••• 678, so the patient can see which phone the prompt
+// went to without the full number being shown on screen.
+function maskPhone(phone) {
+  const d = String(phone || '')
+  if (d.length < 12) return null
+  return `0${d.slice(3, 4)}\u2022\u2022 \u2022\u2022\u2022 ${d.slice(-3)}`
+}
+
 const USER_INCLUDE = {
   clinician: { select: { id: true, fullName: true, type: true } },
   sponsoringInstitution: { select: { name: true } },
@@ -57,6 +65,7 @@ function userView(t) {
           amountKes: t.payment.amountKes,
           mpesaReceiptNumber: t.payment.mpesaReceiptNumber,
           resultDesc: t.payment.resultDesc,
+          phoneMasked: maskPhone(t.payment.phoneNumber),
         }
       : null,
     care: {
@@ -288,9 +297,14 @@ triageRouter.get('/:id', requireAuth, requireRole('user', 'professional'), wrap(
 // ---------------------------------------------------------------------------
 // Patient: pay the triage fee by M-Pesa. The amount comes from the price
 // list on the server; the client never sends it.
+//
+// phoneNumber is optional: without it the prompt goes to the phone saved on
+// the patient's registration, so the app can send it the moment the triage
+// opens. A number typed here is saved to the registration if none is saved
+// yet. With neither, the request fails with PHONE_REQUIRED and the app asks.
 // ---------------------------------------------------------------------------
 
-const paySchema = z.object({ phoneNumber: z.string().min(9) })
+const paySchema = z.object({ phoneNumber: z.string().min(9).optional() })
 
 triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req, res) => {
   const parsed = paySchema.safeParse(req.body)
@@ -316,10 +330,17 @@ triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req,
     )
   }
 
-  const phone = normalizeKenyanPhone(parsed.data.phoneNumber)
-  if (!phone) throw new HttpError(400, 'Please enter a valid Kenyan phone number.')
+  const user = await prisma.user.findUnique({ where: { id: req.auth.id }, select: { phone: true } })
+  const typed = parsed.data.phoneNumber
+  const phone = typed ? normalizeKenyanPhone(typed) : normalizeKenyanPhone(user?.phone || '')
+  if (typed && !phone) throw new HttpError(400, 'Please enter a valid Kenyan phone number.')
+  if (!phone) throw new HttpError(400, 'Please enter the M-Pesa number to send the prompt to.', 'PHONE_REQUIRED')
 
   if (!process.env.PUBLIC_API_URL) throw new HttpError(500, 'Payments are not configured on this server yet.')
+
+  if (typed && !user?.phone) {
+    await prisma.user.update({ where: { id: req.auth.id }, data: { phone } })
+  }
 
   const row = await getPriceRow('TRIAGE')
   if (!row || !row.active) throw new HttpError(503, 'Triage is not available right now.', 'SERVICE_UNAVAILABLE')
@@ -370,7 +391,7 @@ triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req,
   })
 
   // The patient polls GET /:id until payment.status leaves PENDING.
-  res.status(201).json({ status: payment.status, amountKes })
+  res.status(201).json({ status: payment.status, amountKes, phoneMasked: maskPhone(phone) })
 }))
 
 // ---------------------------------------------------------------------------

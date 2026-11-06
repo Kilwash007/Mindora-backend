@@ -1,4 +1,5 @@
 import { Resend } from 'resend'
+import { TRIAGE_RESPONSE_MINUTES } from './triage.js'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
@@ -67,7 +68,7 @@ const escapeHtml = (value) =>
 // Tells a clinician a triage is waiting. It says nothing about the patient:
 // email is not a safe place for health information, so the details stay in
 // the portal. EMAIL_DISABLED=true skips sending (used by local tests).
-export async function sendTriageQueuedEmail(to, { name, urgent, assigned }) {
+export async function sendTriageQueuedEmail(to, { name, urgent, assigned, onCall }) {
   if (process.env.EMAIL_DISABLED === 'true') return
 
   const base = (process.env.PRO_PORTAL_URL || '').replace(/\/$/, '')
@@ -76,7 +77,9 @@ export async function sendTriageQueuedEmail(to, { name, urgent, assigned }) {
     : '<p>Sign in to your Mindora professional portal and open <strong>Triage</strong>.</p>'
   const why = assigned
     ? 'A new triage has been assigned to you.'
-    : 'Nobody is on call for triage right now, so this was sent to every clinician who can take it. Open the queue and choose <strong>Take this triage</strong>, or switch yourself on call.'
+    : onCall
+      ? 'A new triage is waiting. It has been sent to every clinician on call, and the first to choose <strong>Take this triage</strong> in the queue looks after it.'
+      : 'Nobody is on call for triage right now, so this was sent to every clinician who can take it. Open the queue and choose <strong>Take this triage</strong>, or switch yourself on call.'
 
   await resend.emails.send({
     from: FROM_ADDRESS,
@@ -89,7 +92,7 @@ export async function sendTriageQueuedEmail(to, { name, urgent, assigned }) {
         <p>${why}</p>
         ${urgent ? '<p><strong>This one is urgent. Please look at it as soon as you can.</strong></p>' : ''}
         ${link}
-        <p style="color: #565d70; font-size: 13px;">Patients are told to expect a first reply within 2 hours, between 8am and 8pm EAT. No patient details are sent by email.</p>
+        <p style="color: #565d70; font-size: 13px;">Patients are told to expect a first reply within ${TRIAGE_RESPONSE_MINUTES} minutes, between 8am and 8pm EAT. No patient details are sent by email.</p>
       </div>
     `,
   })
@@ -140,7 +143,7 @@ export async function sendTriageOverdueEmail(to, { name, urgent, stage }) {
         <p>Hello ${escapeHtml(name)},</p>
         <p>${copy.lead}</p>
         ${link}
-        <p style="color: #565d70; font-size: 13px;">Patients are told to expect a first reply within 2 hours, between 8am and 8pm EAT. No patient details are sent by email.</p>
+        <p style="color: #565d70; font-size: 13px;">Patients are told to expect a first reply within ${TRIAGE_RESPONSE_MINUTES} minutes, between 8am and 8pm EAT. No patient details are sent by email.</p>
       </div>
     `,
   })

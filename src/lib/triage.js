@@ -68,14 +68,16 @@ export const CARE_LEVEL_SERVICE = {
 export const ICD10_PATTERN = /^[A-TV-Z][0-9][0-9AB](\.[0-9A-TV-Z]{1,4})?$/
 
 // ---------------------------------------------------------------------------
-// Service hours: chat triage is answered within 2 hours between 8am and 8pm
-// East Africa Time (UTC+3, no daylight saving).
+// Service hours: chat triage gets a first reply within TRIAGE_RESPONSE_MINUTES
+// (default 60) between 8am and 8pm East Africa Time (UTC+3, no daylight
+// saving). Set TRIAGE_RESPONSE_MINUTES on the server to change the promise.
 // ---------------------------------------------------------------------------
 
 const EAT_OFFSET_MS = 3 * 60 * 60 * 1000
 const OPEN_MIN = 8 * 60
 const CLOSE_MIN = 20 * 60
-const RESPONSE_MIN = 120
+export const TRIAGE_RESPONSE_MINUTES = Math.max(5, Number(process.env.TRIAGE_RESPONSE_MINUTES) || 60)
+const RESPONSE_MIN = TRIAGE_RESPONSE_MINUTES
 
 export const SERVICE_HOURS_LABEL = '8:00 am to 8:00 pm EAT'
 
@@ -117,14 +119,27 @@ export function nextReviewBy(since, now = new Date()) {
 }
 
 // ---------------------------------------------------------------------------
-// Round-robin assignment: the verified, on-call, eligible clinician who was
-// assigned least recently (never-assigned first). The claim is a guarded
-// update, so two triages arriving at the same moment cannot both pick the
-// same clinician. Pass a transaction client to run it inside a transaction.
-// Returns a professional id, or null when nobody is on call.
+// How a new triage reaches a clinician (TRIAGE_ASSIGNMENT on the server):
+//
+//   broadcast (default) - nobody is assigned up front. Every clinician on call
+//     is alerted at once (triageNotify.js) and the first to choose "Take this
+//     triage" in the queue gets it (POST /triage/:id/claim). One busy
+//     clinician can never hold a patient up.
+//   round_robin - the original behaviour: the verified, on-call, eligible
+//     clinician assigned least recently gets it.
+//
+// assignClinician returns a professional id, or null when the triage should
+// wait in the shared queue (broadcast mode, or nobody on call).
 // ---------------------------------------------------------------------------
 
+export const TRIAGE_ASSIGNMENT_MODE = process.env.TRIAGE_ASSIGNMENT === 'round_robin' ? 'round_robin' : 'broadcast'
+
+// Round robin: the claim is a guarded update, so two triages arriving at the
+// same moment cannot both pick the same clinician. Pass a transaction client
+// to run it inside a transaction.
 export async function assignClinician(client) {
+  if (TRIAGE_ASSIGNMENT_MODE === 'broadcast') return null
+
   for (let attempt = 0; attempt < 3; attempt++) {
     const candidate = await client.professional.findFirst({
       where: {
