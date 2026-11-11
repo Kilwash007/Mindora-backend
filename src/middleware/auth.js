@@ -2,13 +2,21 @@ import { verifyAccessToken } from '../lib/auth.js'
 import { prisma } from '../lib/prisma.js'
 import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 
-// Attaches req.auth = { id, role, adminRole? } if a valid token is present.
+// Attaches req.auth = { id, role, adminRole?, orgId?, orgRole? } if a valid
+// token is present. orgId / orgRole are the account's workspace (see
+// lib/workspace.js); middleware/workspace.js turns them into req.ctx.
 export function attachAuth(req, _res, next) {
   const header = req.headers.authorization
   if (header?.startsWith('Bearer ')) {
     try {
       const payload = verifyAccessToken(header.slice(7))
-      req.auth = { id: payload.sub, role: payload.role, adminRole: payload.adminRole }
+      req.auth = {
+        id: payload.sub,
+        role: payload.role,
+        adminRole: payload.adminRole,
+        orgId: payload.orgId ?? null,
+        orgRole: payload.orgRole ?? null,
+      }
     } catch {
       // invalid/expired token — leave req.auth undefined
     }

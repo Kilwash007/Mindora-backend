@@ -5,11 +5,14 @@ import {
   hashRefreshToken,
   refreshTokenExpiryDate,
 } from './auth.js'
+import { workspaceClaims } from './workspace.js'
 
 // Issues a fresh access + refresh token pair for a given account, and
 // stores the refresh token's hash so it can later be looked up and revoked.
-export async function issueSession({ id, role, adminRole }) {
-  const accessToken = signAccessToken({ id, role, adminRole })
+// orgId / orgRole come from workspaceClaims (lib/workspace.js); leave them
+// out for Mindora Care accounts and Mindora admins.
+export async function issueSession({ id, role, adminRole, orgId, orgRole }) {
+  const accessToken = signAccessToken({ id, role, adminRole, orgId, orgRole })
 
   const refreshValue = generateRefreshTokenValue()
   await prisma.refreshToken.create({
@@ -29,6 +32,10 @@ export async function issueSession({ id, role, adminRole }) {
 // this means a stolen refresh token can only be used once before the
 // legitimate owner's next refresh silently invalidates it, limiting the
 // damage window if one ever leaks.
+//
+// The workspace is worked out again here rather than copied from the old
+// token, so a membership that has ended, or a workspace that has been
+// suspended or closed, stops the session at the next refresh.
 export async function refreshSession(refreshValue) {
   const tokenHash = hashRefreshToken(refreshValue)
   const stored = await prisma.refreshToken.findUnique({ where: { tokenHash } })
@@ -46,7 +53,24 @@ export async function refreshSession(refreshValue) {
     adminRole = admin.role
   }
 
-  return issueSession({ id: stored.accountId, role: stored.role, adminRole })
+  if (stored.role === 'org') {
+    const orgAdmin = await prisma.orgAdmin.findUnique({
+      where: { id: stored.accountId },
+      select: { deletedAt: true },
+    })
+    if (!orgAdmin || orgAdmin.deletedAt) return null
+  }
+
+  const claims = await workspaceClaims(stored.role, stored.accountId)
+  if (!claims.ok) return null
+
+  return issueSession({
+    id: stored.accountId,
+    role: stored.role,
+    adminRole,
+    orgId: claims.orgId,
+    orgRole: claims.orgRole,
+  })
 }
 
 // Revokes one specific refresh token — used on logout.

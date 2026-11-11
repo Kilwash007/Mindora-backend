@@ -15,11 +15,17 @@ export async function verifyPassword(plain, hash) {
 }
 
 // Short-lived access token — sent on every API call, expires in 15 minutes.
-// portalRole: 'user' | 'professional' | 'admin'
-// adminRole (only for portalRole 'admin'): 'PLATFORM_ADMIN' | 'CLINICAL_SAFETY_REVIEWER' | 'SUPPORT'
-export function signAccessToken({ id, role, adminRole }) {
+// role: 'user' | 'professional' | 'admin' | 'org'
+// adminRole (only for role 'admin'): 'PLATFORM_ADMIN' | 'CLINICAL_SAFETY_REVIEWER' | 'SUPPORT'
+// orgId / orgRole: the workspace the account belongs to (lib/workspace.js).
+// Left out entirely for Mindora Care accounts and Mindora admins.
+export function signAccessToken({ id, role, adminRole, orgId, orgRole }) {
   const payload = { sub: id, role }
   if (adminRole) payload.adminRole = adminRole
+  if (orgId && role !== 'admin') {
+    payload.orgId = orgId
+    payload.orgRole = orgRole
+  }
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL })
 }
 

@@ -4,6 +4,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import morgan from 'morgan'
 import { attachAuth } from './middleware/auth.js'
+import { resolveWorkspace } from './middleware/workspace.js'
 import { apiLimiter } from './middleware/rateLimit.js'
 import { authRouter } from './routes/auth.routes.js'
 import { referralRouter } from './routes/referral.routes.js'
@@ -113,6 +114,8 @@ app.use(
 )
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 app.use(attachAuth)
+// req.ctx: the workspace this request acts in (Mindora Care when empty).
+app.use(resolveWorkspace)
 app.use('/api', apiLimiter)
 
 // Root and health endpoints. The root route stops Render's own probes from

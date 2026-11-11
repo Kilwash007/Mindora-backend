@@ -18,6 +18,7 @@ import { CURRENT_CONSENT_VERSION } from '../lib/consent.js'
 import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
 import { findEnrollableInstitution } from '../lib/enroll.js'
 import { dateOfBirthField, dobToDate, isUnder18, UNDER_18_SIGNUP } from '../lib/age.js'
+import { workspaceClaims } from '../lib/workspace.js'
 
 export const authRouter = Router()
 
@@ -66,6 +67,18 @@ async function issueOtp(email, role) {
     },
   })
   await sendOtpEmail(email, code)
+}
+
+// Workspace members whose access has ended, or whose institution's
+// workspace is suspended or closed, are stopped here with a clear reason.
+// Mindora Care accounts always pass.
+function refuseWorkspace(res, claims) {
+  return res.status(claims.status).json({ error: claims.error, code: claims.code })
+}
+
+// What the frontend is told about the account's workspace after sign-in.
+function workspaceSummary(claims) {
+  return claims.orgId ? { id: claims.orgId, name: claims.orgName, role: claims.orgRole } : null
 }
 
 // --- User ---
@@ -123,6 +136,9 @@ authRouter.post('/user/login', loginLimiter, async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password.' })
   }
 
+  const claims = await workspaceClaims('user', user.id)
+  if (!claims.ok) return refuseWorkspace(res, claims)
+
   await issueOtp(email, 'user')
   res.json({ otpRequired: true, email })
 })
@@ -164,6 +180,9 @@ authRouter.post('/professional/login', loginLimiter, async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password.' })
   }
 
+  const claims = await workspaceClaims('professional', professional.id)
+  if (!claims.ok) return refuseWorkspace(res, claims)
+
   await issueOtp(email, 'professional')
   res.json({ otpRequired: true, email })
 })
@@ -184,10 +203,33 @@ authRouter.post('/admin/login', loginLimiter, async (req, res) => {
   res.json({ otpRequired: true, email })
 })
 
+// --- Institution owners and admins (Mindora for Institutions) ---
+//
+// OrgAdmin accounts are created only through a workspace invite (never by
+// public sign-up) and always belong to exactly one workspace. Same
+// password-then-emailed-code login as everyone else.
+
+authRouter.post('/org/login', loginLimiter, async (req, res) => {
+  const parsed = loginSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const { email, password } = parsed.data
+  const orgAdmin = await prisma.orgAdmin.findUnique({ where: { email } })
+  if (!orgAdmin || orgAdmin.deletedAt || !(await verifyPassword(password, orgAdmin.passwordHash))) {
+    return res.status(401).json({ error: 'Invalid email or password.' })
+  }
+
+  const claims = await workspaceClaims('org', orgAdmin.id)
+  if (!claims.ok) return refuseWorkspace(res, claims)
+
+  await issueOtp(email, 'org')
+  res.json({ otpRequired: true, email })
+})
+
 // --- Shared OTP verification ---
 
 const verifyOtpSchema = z.object({
-  role: z.enum(['user', 'professional', 'admin']),
+  role: z.enum(['user', 'professional', 'admin', 'org']),
   email: z.string().email(),
   code: z.string().length(6),
 })
@@ -209,20 +251,49 @@ authRouter.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
 
   await prisma.loginOtp.update({ where: { id: otp.id }, data: { consumedAt: new Date() } })
 
+  // The workspace is checked again here: access could have ended in the
+  // minutes between the password step and the code.
   if (role === 'user') {
     const user = await prisma.user.findUnique({ where: { email } })
     if (!user) return res.status(404).json({ error: 'Account not found.' })
-    const session = await issueSession({ id: user.id, role: 'user' })
-    return res.json({ ...session, user: { id: user.id, fullName: user.fullName, email: user.email } })
+    const claims = await workspaceClaims('user', user.id)
+    if (!claims.ok) return refuseWorkspace(res, claims)
+    const session = await issueSession({ id: user.id, role: 'user', orgId: claims.orgId, orgRole: claims.orgRole })
+    return res.json({
+      ...session,
+      user: { id: user.id, fullName: user.fullName, email: user.email },
+      workspace: workspaceSummary(claims),
+    })
   }
 
   if (role === 'professional') {
     const professional = await prisma.professional.findUnique({ where: { email } })
     if (!professional) return res.status(404).json({ error: 'Account not found.' })
-    const session = await issueSession({ id: professional.id, role: 'professional' })
+    const claims = await workspaceClaims('professional', professional.id)
+    if (!claims.ok) return refuseWorkspace(res, claims)
+    const session = await issueSession({
+      id: professional.id,
+      role: 'professional',
+      orgId: claims.orgId,
+      orgRole: claims.orgRole,
+    })
     return res.json({
       ...session,
       professional: { id: professional.id, fullName: professional.fullName, verified: professional.verified },
+      workspace: workspaceSummary(claims),
+    })
+  }
+
+  if (role === 'org') {
+    const orgAdmin = await prisma.orgAdmin.findUnique({ where: { email } })
+    if (!orgAdmin || orgAdmin.deletedAt) return res.status(404).json({ error: 'Account not found.' })
+    const claims = await workspaceClaims('org', orgAdmin.id)
+    if (!claims.ok) return refuseWorkspace(res, claims)
+    const session = await issueSession({ id: orgAdmin.id, role: 'org', orgId: claims.orgId, orgRole: claims.orgRole })
+    return res.json({
+      ...session,
+      orgAdmin: { id: orgAdmin.id, fullName: orgAdmin.fullName, email: orgAdmin.email },
+      workspace: workspaceSummary(claims),
     })
   }
 
@@ -232,7 +303,7 @@ authRouter.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
   res.json({ ...session, admin: { id: admin.id, fullName: admin.fullName, role: admin.role } })
 })
 
-// --- Password reset (users and professionals only) ---
+// --- Password reset (users, professionals and institution admins) ---
 //
 // Admin passwords are reset by another platform admin, never by email.
 // Reset codes live in their own table so one can never be submitted to
@@ -242,19 +313,21 @@ const RESET_MAX_ATTEMPTS = 5
 const RESET_COOLDOWN_MS = 60 * 1000
 
 const forgotSchema = z.object({
-  role: z.enum(['user', 'professional']),
+  role: z.enum(['user', 'professional', 'org']),
   email: z.string().email(),
 })
 
 const resetSchema = z.object({
-  role: z.enum(['user', 'professional']),
+  role: z.enum(['user', 'professional', 'org']),
   email: z.string().email(),
   code: z.string().length(6),
   newPassword: z.string().min(8),
 })
 
 function accountTable(client, role) {
-  return role === 'user' ? client.user : client.professional
+  if (role === 'user') return client.user
+  if (role === 'professional') return client.professional
+  return client.orgAdmin
 }
 
 authRouter.post('/forgot-password', resetRequestLimiter, async (req, res) => {
