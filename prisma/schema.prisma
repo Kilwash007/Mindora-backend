@@ -184,6 +184,35 @@ enum Sex {
   PREFER_NOT_TO_SAY
 }
 
+// Mindora for Institutions (workspaces). See the Workspaces section below.
+enum OrgType {
+  PROVIDER
+  NGO
+  UNIVERSITY
+  EMPLOYER
+  INSURER
+}
+
+enum OrgStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum OrgRole {
+  ORG_OWNER
+  ORG_ADMIN
+  ORG_CLINICIAN
+  ORG_PATIENT
+}
+
+enum UsageKind {
+  SESSION_COMPLETED
+  ESCALATION
+  SEAT_ACTIVE
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -226,6 +255,7 @@ model User {
   groupMemberships         GroupMembership[]
   studentRateVerifications StudentRateVerification[]
   triages                  Triage[]
+  orgMembership            OrganizationMembership?
 
   @@map("users")
 }
@@ -267,10 +297,11 @@ model Professional {
   auditLogs     AuditLog[]
   documents     ProfessionalDocument[]
   reviews       Review[]
-  sentMessages  Message[]              @relation("MessagesSentByProfessional")
+  sentMessages  Message[]               @relation("MessagesSentByProfessional")
   supportGroups SupportGroup[]
   payouts       Payout[]
   triages       Triage[]
+  orgMembership OrganizationMembership?
 
   @@map("professionals")
 }
@@ -286,6 +317,26 @@ model Admin {
   auditLogs AuditLog[]
 
   @@map("admins")
+}
+
+// Owners and admins of an institution's workspace. A fourth account type,
+// kept apart from Admin (Mindora's own staff) for the same reason User,
+// Professional and Admin are apart: an institution admin must never be able
+// to pick up Mindora-wide privileges. Signs in to the institution portal
+// with role "org". Linked to exactly one workspace through its membership.
+model OrgAdmin {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  fullName     String
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  membership OrganizationMembership?
+  auditLogs  AuditLog[]
+
+  @@map("org_admins")
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +359,10 @@ model CheckIn {
   referral Referral?
   triage   Triage?
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([userId, completedAt])
   @@map("check_ins")
 }
@@ -387,6 +442,10 @@ model Triage {
   payment      Payment?
   messages     Message[]
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([status, createdAt])
   @@index([clinicianId, status])
   @@index([userId])
@@ -414,6 +473,10 @@ model Referral {
 
   flags ReferralFlag[]
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([professionalId, status])
   @@map("referrals")
 }
@@ -460,6 +523,10 @@ model Appointment {
   payment      Payment?
   creditTriage Triage?  @relation("TriageCreditAppointment")
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([professionalId, scheduledFor])
   @@index([userId, scheduledFor])
   @@index([payoutId])
@@ -476,6 +543,10 @@ model ClinicalNote {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([professionalId, userId])
   @@map("clinical_notes")
 }
@@ -536,6 +607,10 @@ model Message {
   readAt         DateTime?
   createdAt      DateTime     @default(now())
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([userId, professionalId, createdAt])
   @@index([triageId, createdAt])
   @@map("messages")
@@ -661,6 +736,10 @@ model Payment {
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([status])
   @@map("payments")
 }
@@ -733,6 +812,10 @@ model SafetyAlert {
   resolvedAt     DateTime?
   createdAt      DateTime  @default(now())
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
   @@index([riskLevel, resolvedAt])
   @@map("safety_alerts")
 }
@@ -837,6 +920,8 @@ model AuditLog {
   professional   Professional? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
   adminId        String?
   admin          Admin?        @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  orgAdminId     String?
+  orgAdmin       OrgAdmin?     @relation(fields: [orgAdminId], references: [id], onDelete: SetNull)
   action         String
   resourceType   String
   resourceId     String?
@@ -894,4 +979,115 @@ model KcbIpnNotification {
   @@index([matchedPaymentId])
   @@index([createdAt])
   @@map("kcb_ipn_notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces (Mindora for Institutions)
+//
+// An institution licenses the platform and runs its own clinicians and
+// patients inside a private workspace (Organization). Records with an empty
+// organizationId are Mindora Care, exactly as before; records with one belong
+// to that workspace only. The older Institution model (codes and sponsorship
+// for Mindora Care) is a separate concept and is unchanged.
+//
+// OrganizationMembership links exactly one account to one workspace:
+//   ORG_PATIENT   -> userId          (a User)
+//   ORG_CLINICIAN -> professionalId  (a Professional)
+//   ORG_OWNER / ORG_ADMIN -> orgAdminId (an OrgAdmin)
+// Each account column is unique, so an account belongs to at most one
+// workspace in Phase 1. A CHECK constraint in the migration enforces that
+// exactly the matching column is filled for the role.
+//
+// Workspaces are never deleted, only CLOSED; onDelete: Restrict on every
+// link to Organization stops a delete from removing clinical records.
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id               String    @id @default(uuid())
+  name             String
+  type             OrgType
+  status           OrgStatus @default(TRIAL)
+  plan             String    @default("pilot")
+  logoUrl          String?
+  escalationEmails String[]
+  escalationPhone  String?
+  billingEmail     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  memberships   OrganizationMembership[]
+  invites       OrganizationInvite[]
+  usageEvents   UsageEvent[]
+  checkIns      CheckIn[]
+  triages       Triage[]
+  referrals     Referral[]
+  appointments  Appointment[]
+  clinicalNotes ClinicalNote[]
+  messages      Message[]
+  payments      Payment[]
+  safetyAlerts  SafetyAlert[]
+
+  @@index([status])
+  @@map("organizations")
+}
+
+model OrganizationMembership {
+  id             String        @id @default(uuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role           OrgRole
+  userId         String?       @unique
+  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  professionalId String?       @unique
+  professional   Professional? @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+  orgAdminId     String?       @unique
+  orgAdmin       OrgAdmin?     @relation(fields: [orgAdminId], references: [id], onDelete: Cascade)
+  active         Boolean       @default(true)
+  // Clinicians only: attested by the institution when it invites them.
+  licenceNumber  String?
+  licenceExpiry  DateTime?     @db.Date
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([organizationId, role])
+  @@map("organization_memberships")
+}
+
+// An emailed invitation to join a workspace. Only the hash of the invite
+// token is stored; the token itself is only ever in the email link.
+model OrganizationInvite {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  email          String
+  role           OrgRole
+  tokenHash      String       @unique
+  licenceNumber  String?
+  licenceExpiry  DateTime?    @db.Date
+  invitedByType  String // "admin" (Mindora) | "org"
+  invitedById    String
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("organization_invites")
+}
+
+// What a workspace used, for the monthly invoice. refId points at what was
+// counted (an appointment, a safety alert, or "<membershipId>:<YYYY-MM>" for a
+// seat), and the unique key stops the same thing being counted twice.
+model UsageEvent {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  kind           UsageKind
+  refId          String?
+  occurredAt     DateTime     @default(now())
+
+  @@unique([organizationId, kind, refId])
+  @@index([organizationId, occurredAt])
+  @@map("usage_events")
 }
