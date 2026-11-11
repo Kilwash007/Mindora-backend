@@ -65,3 +65,27 @@ export async function workspaceClaims(role, accountId, client = prisma) {
 
   return { ok: true, orgId: organization.id, orgRole: membership.role, orgName: organization.name }
 }
+
+// ---------------------------------------------------------------------------
+// Who belongs to a scope. Accounts (User, Professional) are not tenant
+// tables, so db() does not filter them; these filters do. Pass the scope's
+// orgId: null means Mindora Care.
+//
+//   Mindora Care -> accounts with no workspace membership at all
+//   a workspace  -> accounts with an ACTIVE membership in that workspace
+//
+// Use them wherever accounts are listed or picked: the professional
+// directory, booking, triage rotas and alerts, and Mindora's admin pages.
+// ---------------------------------------------------------------------------
+
+export function professionalScope(orgId) {
+  return orgId
+    ? { orgMembership: { is: { organizationId: orgId, active: true } } }
+    : { orgMembership: { is: null } }
+}
+
+export function userScope(orgId) {
+  return orgId
+    ? { orgMembership: { is: { organizationId: orgId, active: true } } }
+    : { orgMembership: { is: null } }
+}

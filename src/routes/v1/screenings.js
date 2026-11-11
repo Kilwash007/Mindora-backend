@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { prisma } from '../../lib/prisma.js'
+import { db } from '../../lib/db.js'
 import { requireAuth, requireRole } from '../../middleware/auth.js'
 import { audit } from '../../lib/audit.js'
 import { wrap, HttpError } from '../../lib/wrap.js'
@@ -21,6 +21,11 @@ export const screeningsRouter = Router()
 // happens next: an ACUTE result (which always means PHQ-9 item 9 was
 // positive) creates a FREE urgent triage straight away, never behind a
 // paywall. Every other result is told to pay for a triage.
+//
+// Everything is written through db(req.ctx), so a workspace member's
+// screening, safety alert and triage belong to their workspace (and only
+// that workspace's clinicians are assigned). In a workspace the institution
+// covers triage, so the answer says covered: true.
 screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) => {
   const parsed = answersSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -35,7 +40,7 @@ screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, re
   const isCrisis = riskLevel === 'ACUTE'
   const userId = req.auth.id
 
-  const { checkIn, triage } = await prisma.$transaction(async (tx) => {
+  const { checkIn, triage } = await db(req.ctx).$transaction(async (tx) => {
     const checkIn = await tx.checkIn.create({
       data: { userId, riskLevel, totalScore, maxScore, answers: { create: answers } },
     })
@@ -54,7 +59,7 @@ screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, re
 
     let triage = null
     if (isCrisis) {
-      const clinicianId = await assignClinician(tx)
+      const clinicianId = await assignClinician(tx, req.ctx.orgId)
       triage = await tx.triage.create({
         data: {
           userId,
@@ -79,6 +84,7 @@ screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, re
     resourceType: 'check_in',
     resourceId: checkIn.id,
     metadata: { riskLevel, substanceFlag, phq9Score, gad7Score, cageScore, freeTriageId: triage?.id ?? null },
+    organizationId: req.ctx.orgId,
   })
 
   res.status(201).json({
@@ -94,6 +100,7 @@ screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, re
     validUntil: screeningValidUntil(checkIn.completedAt),
     isCrisis,
     next: isCrisis ? 'FREE_TRIAGE' : 'PAY_TRIAGE',
+    covered: !isCrisis && Boolean(req.ctx.orgId),
     triageId: triage?.id ?? null,
     crisis: substanceFlag ? [...CRISIS_RESOURCES, SUBSTANCE_RESOURCE] : CRISIS_RESOURCES,
   })
@@ -102,7 +109,7 @@ screeningsRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, re
 // The patient's most recent screening, whether it is still valid, and any
 // triage already started from it.
 screeningsRouter.get('/latest', requireAuth, requireRole('user'), wrap(async (req, res) => {
-  const checkIn = await prisma.checkIn.findFirst({
+  const checkIn = await db(req.ctx).checkIn.findFirst({
     where: { userId: req.auth.id },
     orderBy: { completedAt: 'desc' },
     include: { triage: { select: { id: true, status: true, isFree: true, careLevel: true } } },

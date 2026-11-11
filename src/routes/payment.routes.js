@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
+import { db } from '../lib/db.js'
 import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { initiateStkPush, normalizeKenyanPhone } from '../lib/mpesa.js'
@@ -8,6 +9,12 @@ import { assignClinician } from '../lib/triage.js'
 import { notifyTriageQueued } from '../lib/triageNotify.js'
 
 export const paymentRouter = Router()
+
+// Workspaces (Mindora for Institutions): a workspace's sessions and triage
+// are covered by the institution and billed through monthly usage, so
+// patients in a workspace never get an M-Pesa prompt, and a workspace's
+// clinicians are paid by their institution. The payout ledger below is
+// therefore Mindora Care only (organizationId: null).
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
@@ -35,7 +42,7 @@ function isSettleable(appt) {
 
 async function findOwedAppointments(where = {}) {
   const candidates = await prisma.appointment.findMany({
-    where: { ...where, payoutId: null, status: 'COMPLETED' },
+    where: { ...where, payoutId: null, status: 'COMPLETED', organizationId: null },
     include: { payment: true, professional: { select: { id: true, fullName: true } } },
   })
   return candidates.filter(isSettleable)
@@ -50,6 +57,7 @@ async function findOwedTriages(clinicianId) {
       ...(clinicianId ? { clinicianId } : { clinicianId: { not: null } }),
       payoutId: null,
       status: 'COMPLETED',
+      organizationId: null,
       clinicianPayoutKes: { gt: 0 },
       OR: [{ isFree: true }, { sponsoringInstitutionId: { not: null } }, { payment: { status: 'PAID' } }],
     },
@@ -75,7 +83,11 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
 
   const { appointmentId, phoneNumber } = parsed.data
 
-  const appointment = await prisma.appointment.findUnique({
+  if (req.ctx.orgId) {
+    return res.status(400).json({ error: 'Sessions are covered by your organisation. There is nothing to pay.' })
+  }
+
+  const appointment = await db(req.ctx).appointment.findUnique({
     where: { id: appointmentId },
     include: { payment: true },
   })
@@ -139,7 +151,7 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
 
   // upsert: a patient retrying after a failed/expired push reuses the same
   // Payment row rather than erroring on the appointment's unique constraint.
-  const payment = await prisma.payment.upsert({
+  const payment = await db(req.ctx).payment.upsert({
     where: { appointmentId },
     create: {
       appointmentId,
@@ -180,7 +192,7 @@ paymentRouter.post('/initiate', requireAuth, requireRole('user'), wrap(async (re
 
 // Patient polls this while waiting for the STK push to be answered.
 paymentRouter.get('/appointment/:appointmentId', requireAuth, requireRole('user'), wrap(async (req, res) => {
-  const appointment = await prisma.appointment.findUnique({
+  const appointment = await db(req.ctx).appointment.findUnique({
     where: { id: req.params.appointmentId },
     include: { payment: true },
   })
@@ -221,7 +233,7 @@ async function onTriagePaid(tx, payment) {
     console.error('[mpesa callback] Paid triage is not awaiting payment:', payment.triageId, triage?.status)
     return
   }
-  const clinicianId = await assignClinician(tx)
+  const clinicianId = await assignClinician(tx, triage.organizationId)
   await tx.triage.update({
     where: { id: triage.id },
     data: { status: 'QUEUED', creditKes: payment.amountKes, clinicianId },

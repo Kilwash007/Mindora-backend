@@ -8,7 +8,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import morgan from 'morgan'
 import { attachAuth } from './middleware/auth.js'
-import { resolveWorkspace } from './middleware/workspace.js'
+import { resolveWorkspace, requireMindoraCare } from './middleware/workspace.js'
 import { apiLimiter } from './middleware/rateLimit.js'
 import { authRouter } from './routes/auth.routes.js'
 import { referralRouter } from './routes/referral.routes.js'
@@ -120,14 +120,20 @@ app.use('/api/appointments', appointmentRouter)
 app.use('/api/clients', clientRouter)
 app.use('/api/documents', documentRouter)
 app.use('/api/institutions', institutionRouter)
-app.use('/api/ai', aiRouter)
+// Mindora Care features that are not part of an institution's workspace in
+// Phase 1: Mindora AI, programme codes, reviews, support groups and the
+// Student Rate. Workspace members are refused them (403 NOT_IN_WORKSPACE);
+// everyone else is unaffected.
+app.use('/api/ai', requireMindoraCare, aiRouter)
+app.use('/api/account/enroll', requireMindoraCare)
+app.use('/api/account/institution', requireMindoraCare)
 app.use('/api/account', accountRouter)
-app.use('/api/reviews', reviewRouter)
+app.use('/api/reviews', requireMindoraCare, reviewRouter)
 app.use('/api/messages', messageRouter)
-app.use('/api/groups', groupRouter)
+app.use('/api/groups', requireMindoraCare, groupRouter)
 app.use('/api/payments/kcb', kcbIpnRouter)
 app.use('/api/payments', paymentRouter)
-app.use('/api/student-rate', studentRateRouter)
+app.use('/api/student-rate', requireMindoraCare, studentRateRouter)
 app.use('/api/v1', v1Router)
 
 // Centralised error handler — keeps stack traces out of prod responses.

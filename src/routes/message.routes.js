@@ -1,9 +1,13 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma.js'
+import { db } from '../lib/db.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 
+// Workspaces: every query here goes through db(req.ctx), so records are
+// only ever read, written or matched within the caller's own scope
+// (Mindora Care or one institution's workspace), and new records are
+// stamped with it.
 export const messageRouter = Router()
 
 // Everything here is the therapy conversation between a patient and a
@@ -15,8 +19,8 @@ export const messageRouter = Router()
 // between this user and professional — the gate that keeps messaging
 // restricted to pairs who actually have a care relationship, rather than
 // open messaging between any patient and any professional.
-async function hasAppointmentTogether(userId, professionalId) {
-  const appointment = await prisma.appointment.findFirst({
+async function hasAppointmentTogether(ctx, userId, professionalId) {
+  const appointment = await db(ctx).appointment.findFirst({
     where: { userId, professionalId },
   })
   return Boolean(appointment)
@@ -29,7 +33,7 @@ async function hasAppointmentTogether(userId, professionalId) {
 // even before the first message is sent.
 messageRouter.get('/conversations', requireAuth, requireRole('user', 'professional'), async (req, res) => {
   if (req.auth.role === 'user') {
-    const appointments = await prisma.appointment.findMany({
+    const appointments = await db(req.ctx).appointment.findMany({
       where: { userId: req.auth.id },
       select: { professionalId: true, professional: { select: { id: true, fullName: true } } },
       distinct: ['professionalId'],
@@ -38,11 +42,11 @@ messageRouter.get('/conversations', requireAuth, requireRole('user', 'profession
     const conversations = await Promise.all(
       appointments.map(async (a) => {
         const [lastMessage, unreadCount] = await Promise.all([
-          prisma.message.findFirst({
+          db(req.ctx).message.findFirst({
             where: { userId: req.auth.id, professionalId: a.professionalId, triageId: null },
             orderBy: { createdAt: 'desc' },
           }),
-          prisma.message.count({
+          db(req.ctx).message.count({
             where: {
               userId: req.auth.id,
               professionalId: a.professionalId,
@@ -65,7 +69,7 @@ messageRouter.get('/conversations', requireAuth, requireRole('user', 'profession
     return res.json(conversations)
   }
 
-  const appointments = await prisma.appointment.findMany({
+  const appointments = await db(req.ctx).appointment.findMany({
     where: { professionalId: req.auth.id },
     select: { userId: true, user: { select: { id: true, fullName: true } } },
     distinct: ['userId'],
@@ -74,11 +78,11 @@ messageRouter.get('/conversations', requireAuth, requireRole('user', 'profession
   const conversations = await Promise.all(
     appointments.map(async (a) => {
       const [lastMessage, unreadCount] = await Promise.all([
-        prisma.message.findFirst({
+        db(req.ctx).message.findFirst({
           where: { userId: a.userId, professionalId: req.auth.id, triageId: null },
           orderBy: { createdAt: 'desc' },
         }),
-        prisma.message.count({
+        db(req.ctx).message.count({
           where: {
             userId: a.userId,
             professionalId: req.auth.id,
@@ -113,16 +117,16 @@ messageRouter.get(
     const userId = req.auth.role === 'user' ? req.auth.id : otherPartyId
     const professionalId = req.auth.role === 'professional' ? req.auth.id : otherPartyId
 
-    const allowed = await hasAppointmentTogether(userId, professionalId)
+    const allowed = await hasAppointmentTogether(req.ctx, userId, professionalId)
     if (!allowed) return res.status(403).json({ error: 'No shared appointment with this person.' })
 
-    const messages = await prisma.message.findMany({
+    const messages = await db(req.ctx).message.findMany({
       where: { userId, professionalId, triageId: null },
       orderBy: { createdAt: 'asc' },
     })
 
     const incomingSenderRole = req.auth.role === 'user' ? 'professional' : 'user'
-    await prisma.message.updateMany({
+    await db(req.ctx).message.updateMany({
       where: { userId, professionalId, triageId: null, senderRole: incomingSenderRole, readAt: null },
       data: { readAt: new Date() },
     })
@@ -144,10 +148,10 @@ messageRouter.post('/', requireAuth, requireRole('user', 'professional'), async 
   const userId = req.auth.role === 'user' ? req.auth.id : otherPartyId
   const professionalId = req.auth.role === 'professional' ? req.auth.id : otherPartyId
 
-  const allowed = await hasAppointmentTogether(userId, professionalId)
+  const allowed = await hasAppointmentTogether(req.ctx, userId, professionalId)
   if (!allowed) return res.status(403).json({ error: 'No shared appointment with this person.' })
 
-  const message = await prisma.message.create({
+  const message = await db(req.ctx).message.create({
     data: { userId, professionalId, senderRole: req.auth.role, content },
   })
 

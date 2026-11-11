@@ -160,7 +160,18 @@ async function buildScope(key) {
   ]
   const markers = [tag, ...ids, triageCheckIn.id, organizationId, orgAdmin?.id].filter(Boolean)
 
-  return { key, tag, organizationId, actors, ids, markers }
+  return {
+    key,
+    tag,
+    organizationId,
+    actors,
+    ids,
+    markers,
+    patientId: patient.id,
+    clinicianId: clinician.id,
+    triageId: triage.id,
+    appointmentId: appointment.id,
+  }
 }
 
 export async function buildWorld() {

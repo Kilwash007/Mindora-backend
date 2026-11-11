@@ -73,6 +73,8 @@ function scopeOf(ctx) {
 // Prisma create data comes in two styles that can't be mixed: plain
 // foreign-key columns (userId: '...') or relation objects
 // (user: { connect: { id } }). Stamp the workspace in the same style.
+// A nested `create` of child rows (answers: { create: [...] }) is allowed in
+// both styles, so only `connect` / `connectOrCreate` mark the relation style.
 function usesRelationStyle(data) {
   return Object.values(data).some(
     (v) =>
@@ -80,7 +82,7 @@ function usesRelationStyle(data) {
       typeof v === 'object' &&
       !Array.isArray(v) &&
       !(v instanceof Date) &&
-      ('connect' in v || 'create' in v || 'connectOrCreate' in v)
+      ('connect' in v || 'connectOrCreate' in v)
   )
 }
 

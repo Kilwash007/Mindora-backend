@@ -7,6 +7,7 @@ import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 import { STUDENT_RATE_FEE_CAP_KES } from '../lib/pricing.js'
 import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
 import { PUBLIC_PROFESSIONAL_SELECT, stripSecrets } from '../lib/safeSelects.js'
+import { professionalScope } from '../lib/workspace.js'
 
 export const professionalRouter = Router()
 
@@ -18,15 +19,20 @@ export const professionalRouter = Router()
 // the tier (studentRateFeeKes set) and are less experienced/junior
 // (yearsExperience < 3) are sorted first. This is a soft preference, not a
 // filter — every verified professional still appears.
+//
+// The directory is per workspace: Mindora Care sees only Mindora Care's own
+// professionals, and an institution's workspace sees only its own clinicians
+// (lib/workspace.js). Mindora's admins see Mindora Care's.
 professionalRouter.get('/', requireAuth, async (req, res) => {
   const professionals = await prisma.professional.findMany({
-    where: { verified: true, deletedAt: null },
+    where: { verified: true, deletedAt: null, ...professionalScope(req.ctx.orgId) },
     select: PUBLIC_PROFESSIONAL_SELECT,
     orderBy: { createdAt: 'asc' },
   })
 
+  // Student Rate is a Mindora Care tier, so it never re-orders a workspace.
   let studentRateEligible = false
-  if (req.auth.role === 'user') {
+  if (req.auth.role === 'user' && !req.ctx.orgId) {
     const user = await prisma.user.findUnique({
       where: { id: req.auth.id },
       select: { studentRateEligible: true, institution: { select: { type: true, status: true } } },
@@ -171,7 +177,7 @@ professionalRouter.patch('/me/profile', requireAuth, requireRole('professional')
 
 professionalRouter.get('/:id', requireAuth, async (req, res) => {
   const professional = await prisma.professional.findFirst({
-    where: { id: req.params.id, verified: true, deletedAt: null },
+    where: { id: req.params.id, verified: true, deletedAt: null, ...professionalScope(req.ctx.orgId) },
     select: PUBLIC_PROFESSIONAL_SELECT,
   })
   if (!professional) {

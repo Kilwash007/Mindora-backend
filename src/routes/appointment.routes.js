@@ -1,11 +1,15 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma.js'
+import { db } from '../lib/db.js'
 import { requireAuth, requireRole, requireAgreement } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { PUBLIC_PROFESSIONAL_SELECT } from '../lib/safeSelects.js'
 import { holdExpiresAt } from '../lib/holds.js'
 
+// Workspaces: every query here goes through db(req.ctx), so records are
+// only ever read, written or matched within the caller's own scope
+// (Mindora Care or one institution's workspace), and new records are
+// stamped with it.
 export const appointmentRouter = Router()
 
 // Booking has moved to POST /api/v1/appointments. Sessions are now booked
@@ -33,12 +37,12 @@ appointmentRouter.patch(
     const parsed = statusSchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-    const appointment = await prisma.appointment.findUnique({ where: { id: req.params.id } })
+    const appointment = await db(req.ctx).appointment.findUnique({ where: { id: req.params.id } })
     if (!appointment || appointment.professionalId !== req.auth.id) {
       return res.status(404).json({ error: 'Appointment not found.' })
     }
 
-    const updated = await prisma.appointment.update({
+    const updated = await db(req.ctx).appointment.update({
       where: { id: req.params.id },
       data: { status: parsed.data.status },
     })
@@ -60,7 +64,7 @@ appointmentRouter.patch(
 // The professional comes back with public fields only. An unpaid session
 // booked the new way also says when its slot will be released.
 appointmentRouter.get('/mine', requireAuth, requireRole('user'), async (req, res) => {
-  const appointments = await prisma.appointment.findMany({
+  const appointments = await db(req.ctx).appointment.findMany({
     where: { userId: req.auth.id },
     include: { professional: { select: PUBLIC_PROFESSIONAL_SELECT } },
     orderBy: { scheduledFor: 'desc' },
@@ -77,7 +81,7 @@ appointmentRouter.get('/mine', requireAuth, requireRole('user'), async (req, res
 })
 
 appointmentRouter.get('/', requireAuth, requireRole('professional'), requireAgreement, async (req, res) => {
-  const appointments = await prisma.appointment.findMany({
+  const appointments = await db(req.ctx).appointment.findMany({
     where: { professionalId: req.auth.id },
     orderBy: { scheduledFor: 'asc' },
   })

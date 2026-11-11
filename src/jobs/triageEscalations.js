@@ -3,6 +3,7 @@ import { sendTriageOverdueEmail } from '../lib/email.js'
 import { addServiceMinutes } from '../lib/serviceHours.js'
 import { TRIAGE_CLINICIAN_TYPES } from '../lib/triage.js'
 import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
+import { professionalScope } from '../lib/workspace.js'
 
 // Backstop for the promise to patients: a first reply within
 // TRIAGE_RESPONSE_MINUTES (lib/triage.js, default 60) between 8am and 8pm EAT. The clinician is emailed when a triage is queued
@@ -16,6 +17,11 @@ import { CURRENT_AGREEMENT_VERSION } from '../lib/agreement.js'
 // Minutes are service-hours minutes (see serviceHours.js), counted from when
 // the triage joined the queue. An urgent triage runs on a much shorter clock.
 // "Waiting" means no clinician has replied yet (status QUEUED).
+//
+// Workspaces: a workspace's triage is only ever released to, and emailed
+// to, that workspace's own clinicians, and its escalation goes to the
+// workspace's escalation contacts (Organization.escalationEmails) instead of
+// Mindora's TRIAGE_ESCALATION_EMAIL. Mindora Care triages are unchanged.
 export const TIMINGS = {
   routine: { remind: 15, escalate: 30 },
   urgent: { remind: 5, escalate: 15 },
@@ -43,7 +49,7 @@ function adminAddresses() {
     .filter(Boolean)
 }
 
-function findEligibleClinicians(client) {
+function findEligibleClinicians(client, orgId = null) {
   return client.professional.findMany({
     where: {
       verified: true,
@@ -51,6 +57,7 @@ function findEligibleClinicians(client) {
       type: { in: TRIAGE_CLINICIAN_TYPES },
       agreementVersion: CURRENT_AGREEMENT_VERSION,
       agreementAcceptedAt: { not: null },
+      ...professionalScope(orgId),
     },
     select: { email: true, fullName: true },
   })
@@ -81,13 +88,20 @@ export async function checkTriageEscalations({ now = new Date(), send = sendTria
       createdAt: true,
       reminderSentAt: true,
       escalatedAt: true,
+      organizationId: true,
+      organization: { select: { escalationEmails: true } },
       payment: { select: { paidAt: true } },
       clinician: { select: { email: true, fullName: true, deletedAt: true } },
     },
   })
 
-  let eligible
-  const loadEligible = async () => (eligible ??= await findEligibleClinicians(client))
+  // Eligible clinicians, looked up once per scope ('care' or a workspace id).
+  const eligibleByScope = new Map()
+  const loadEligible = async (orgId) => {
+    const key = orgId ?? 'care'
+    if (!eligibleByScope.has(key)) eligibleByScope.set(key, await findEligibleClinicians(client, orgId))
+    return eligibleByScope.get(key)
+  }
 
   for (const t of waiting) {
     const stage = dueStage(t, now)
@@ -108,7 +122,7 @@ export async function checkTriageEscalations({ now = new Date(), send = sendTria
         if (t.clinician && !t.clinician.deletedAt) {
           await deliver(send, [{ to: t.clinician.email, name: t.clinician.fullName, urgent, stage: 'reminder' }])
         } else {
-          const clinicians = await loadEligible()
+          const clinicians = await loadEligible(t.organizationId)
           await deliver(send, clinicians.map((c) => ({ to: c.email, name: c.fullName, urgent, stage: 'unassigned' })))
         }
       } else {
@@ -120,11 +134,15 @@ export async function checkTriageEscalations({ now = new Date(), send = sendTria
         if (claimed.count === 0) continue
         summary.escalated += 1
 
-        const clinicians = await loadEligible()
+        const clinicians = await loadEligible(t.organizationId)
         const notices = clinicians.map((c) => ({ to: c.email, name: c.fullName, urgent, stage: 'released' }))
-        const admins = adminAddresses()
+        const admins = t.organizationId ? t.organization?.escalationEmails ?? [] : adminAddresses()
         if (admins.length === 0) {
-          console.warn('[triage escalation] TRIAGE_ESCALATION_EMAIL is not set, so nobody outside the clinicians was told')
+          console.warn(
+            t.organizationId
+              ? `[triage escalation] workspace ${t.organizationId} has no escalation contacts, so nobody outside its clinicians was told`
+              : '[triage escalation] TRIAGE_ESCALATION_EMAIL is not set, so nobody outside the clinicians was told'
+          )
         }
         for (const to of admins) notices.push({ to, name: 'team', urgent, stage: 'admin' })
         await deliver(send, notices)

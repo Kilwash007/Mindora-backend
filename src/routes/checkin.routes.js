@@ -1,7 +1,11 @@
 import { Router } from 'express'
-import { prisma } from '../lib/prisma.js'
+import { db } from '../lib/db.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 
+// Workspaces: every query here goes through db(req.ctx), so records are
+// only ever read, written or matched within the caller's own scope
+// (Mindora Care or one institution's workspace), and new records are
+// stamped with it.
 export const checkInRouter = Router()
 
 // Submitting a screening has moved to POST /api/v1/screenings. That route
@@ -21,7 +25,7 @@ checkInRouter.post('/', requireAuth, requireRole('user'), (_req, res) => {
 // per-domain answers so the client can compute domain-level trends
 // without a second round trip.
 checkInRouter.get('/', requireAuth, requireRole('user'), async (req, res) => {
-  const checkIns = await prisma.checkIn.findMany({
+  const checkIns = await db(req.ctx).checkIn.findMany({
     where: { userId: req.auth.id },
     orderBy: { completedAt: 'asc' },
     include: { answers: true },
@@ -32,7 +36,7 @@ checkInRouter.get('/', requireAuth, requireRole('user'), async (req, res) => {
 // Most recent check-in for the logged-in user — used to render the
 // dashboard's "current wellbeing" card and the result screen on refresh.
 checkInRouter.get('/latest', requireAuth, requireRole('user'), async (req, res) => {
-  const checkIn = await prisma.checkIn.findFirst({
+  const checkIn = await db(req.ctx).checkIn.findFirst({
     where: { userId: req.auth.id },
     orderBy: { completedAt: 'desc' },
   })

@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../../lib/prisma.js'
+import { db } from '../../lib/db.js'
 import { requireAuth, requireRole, requireAgreement } from '../../middleware/auth.js'
 import { audit } from '../../lib/audit.js'
 import { initiateStkPush, normalizeKenyanPhone } from '../../lib/mpesa.js'
@@ -132,6 +133,17 @@ async function requireTriageClinician(professionalId) {
 }
 
 // ---------------------------------------------------------------------------
+// Workspaces (Mindora for Institutions)
+//
+// Every triage query goes through db(req.ctx), so a triage only ever exists
+// in, and is only ever seen from, its own scope. In a workspace:
+//   - the institution covers triage: it joins the queue straight away, with
+//     no M-Pesa prompt and no Mindora price-list check;
+//   - only that workspace's clinicians are assigned or alerted;
+//   - the clinician is paid by the institution, so no Mindora payout is owed.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Patient: start a triage from a valid screening
 // ---------------------------------------------------------------------------
 
@@ -142,11 +154,11 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
   const userId = req.auth.id
-  const checkIn = await prisma.checkIn.findFirst({ where: { id: parsed.data.checkInId, userId } })
+  const checkIn = await db(req.ctx).checkIn.findFirst({ where: { id: parsed.data.checkInId, userId } })
   if (!checkIn) throw new HttpError(404, 'Screening not found.')
 
   // One triage per screening: asking again returns the one that exists.
-  const existing = await prisma.triage.findUnique({ where: { checkInId: checkIn.id }, include: USER_INCLUDE })
+  const existing = await db(req.ctx).triage.findUnique({ where: { checkInId: checkIn.id }, include: USER_INCLUDE })
   if (existing) return res.json(userView(existing))
 
   if (!isScreeningValid(checkIn.completedAt)) {
@@ -155,25 +167,27 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
 
   // ACUTE always means PHQ-9 item 9 was positive: free, urgent, never a paywall.
   const crisis = checkIn.riskLevel === 'ACUTE'
-  if (!crisis) {
+  const inWorkspace = Boolean(req.ctx.orgId)
+  if (!crisis && !inWorkspace) {
     const row = await getPriceRow('TRIAGE')
     if (!row || !row.active) throw new HttpError(503, 'Triage is not available right now.', 'SERVICE_UNAVAILABLE')
   }
 
   // A pilot member whose institution covers triage gets their first triage
   // free (once). It skips payment and joins the queue like a paid triage.
-  const sponsor = crisis ? null : await findTriageSponsor(userId)
+  const sponsor = crisis || inWorkspace ? null : await findTriageSponsor(userId)
+  const skipsPayment = crisis || inWorkspace || Boolean(sponsor)
 
   let created
   try {
-    created = await prisma.$transaction(async (tx) => {
-      const clinicianId = crisis || sponsor ? await assignClinician(tx) : null
+    created = await db(req.ctx).$transaction(async (tx) => {
+      const clinicianId = skipsPayment ? await assignClinician(tx, req.ctx.orgId) : null
       return tx.triage.create({
         data: {
           userId,
           checkInId: checkIn.id,
           isFree: crisis,
-          status: crisis || sponsor ? 'QUEUED' : 'AWAITING_PAYMENT',
+          status: skipsPayment ? 'QUEUED' : 'AWAITING_PAYMENT',
           urgency: crisis ? 'URGENT' : null,
           clinicianId,
           sponsoringInstitutionId: sponsor?.id ?? null,
@@ -183,7 +197,7 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
     })
   } catch (err) {
     if (err.code === 'P2002') {
-      const again = await prisma.triage.findUnique({ where: { checkInId: checkIn.id }, include: USER_INCLUDE })
+      const again = await db(req.ctx).triage.findUnique({ where: { checkInId: checkIn.id }, include: USER_INCLUDE })
       if (again) return res.json(userView(again))
     }
     throw err
@@ -199,13 +213,14 @@ triageRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) =
     resourceType: 'triage',
     resourceId: created.id,
     metadata: { isFree: created.isFree, sponsored: Boolean(created.sponsoringInstitutionId) },
+    organizationId: req.ctx.orgId,
   })
 
   res.status(201).json(userView(created))
 }))
 
 triageRouter.get('/mine', requireAuth, requireRole('user'), wrap(async (req, res) => {
-  const triages = await prisma.triage.findMany({
+  const triages = await db(req.ctx).triage.findMany({
     where: { userId: req.auth.id },
     include: USER_INCLUDE,
     orderBy: { createdAt: 'desc' },
@@ -220,7 +235,7 @@ triageRouter.get('/mine', requireAuth, requireRole('user'), wrap(async (req, res
 triageRouter.get('/queue', requireAuth, requireRole('professional'), requireAgreement, wrap(async (req, res) => {
   await requireTriageClinician(req.auth.id)
 
-  const items = await prisma.triage.findMany({
+  const items = await db(req.ctx).triage.findMany({
     where: {
       OR: [
         { clinicianId: req.auth.id, status: { in: ['QUEUED', 'IN_PROGRESS'] } },
@@ -234,7 +249,7 @@ triageRouter.get('/queue', requireAuth, requireRole('professional'), requireAgre
     orderBy: { createdAt: 'asc' },
   })
 
-  const unread = await prisma.message.groupBy({
+  const unread = await db(req.ctx).message.groupBy({
     by: ['triageId'],
     where: { triageId: { in: items.map((i) => i.id) }, senderRole: 'user', readAt: null },
     _count: { _all: true },
@@ -266,7 +281,7 @@ triageRouter.get('/queue', requireAuth, requireRole('professional'), requireAgre
 triageRouter.post('/:id/claim', requireAuth, requireRole('professional'), requireAgreement, wrap(async (req, res) => {
   await requireTriageClinician(req.auth.id)
 
-  const claimed = await prisma.triage.updateMany({
+  const claimed = await db(req.ctx).triage.updateMany({
     where: { id: req.params.id, clinicianId: null, status: 'QUEUED' },
     data: { clinicianId: req.auth.id },
   })
@@ -282,12 +297,12 @@ triageRouter.post('/:id/claim', requireAuth, requireRole('professional'), requir
 
 triageRouter.get('/:id', requireAuth, requireRole('user', 'professional'), wrap(async (req, res) => {
   if (req.auth.role === 'user') {
-    const t = await prisma.triage.findUnique({ where: { id: req.params.id }, include: USER_INCLUDE })
+    const t = await db(req.ctx).triage.findUnique({ where: { id: req.params.id }, include: USER_INCLUDE })
     if (!t || t.userId !== req.auth.id) throw new HttpError(404, 'Triage not found.')
     return res.json(userView(t))
   }
 
-  const t = await prisma.triage.findUnique({ where: { id: req.params.id }, include: CLINICIAN_INCLUDE })
+  const t = await db(req.ctx).triage.findUnique({ where: { id: req.params.id }, include: CLINICIAN_INCLUDE })
   if (!t || t.clinicianId !== req.auth.id) throw new HttpError(404, 'Triage not found.')
 
   await audit({ actorType: 'professional', actorId: req.auth.id, action: 'triage.view', resourceType: 'triage', resourceId: t.id })
@@ -310,8 +325,9 @@ triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req,
   const parsed = paySchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  const triage = await prisma.triage.findUnique({ where: { id: req.params.id }, include: { payment: true } })
+  const triage = await db(req.ctx).triage.findUnique({ where: { id: req.params.id }, include: { payment: true } })
   if (!triage || triage.userId !== req.auth.id) throw new HttpError(404, 'Triage not found.')
+  if (req.ctx.orgId) throw new HttpError(400, 'This triage is covered by your organisation. There is nothing to pay.')
   if (triage.isFree) throw new HttpError(400, 'This triage is free. There is nothing to pay.')
   if (triage.sponsoringInstitutionId) {
     throw new HttpError(400, 'This triage is covered by your institution. There is nothing to pay.')
@@ -359,7 +375,7 @@ triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req,
     throw new HttpError(502, `Could not reach M-Pesa: ${err.message}`)
   }
 
-  const payment = await prisma.payment.upsert({
+  const payment = await db(req.ctx).payment.upsert({
     where: { triageId: triage.id },
     create: {
       triageId: triage.id,
@@ -400,7 +416,7 @@ triageRouter.post('/:id/pay', requireAuth, requireRole('user'), wrap(async (req,
 // ---------------------------------------------------------------------------
 
 async function loadParticipantTriage(req) {
-  const t = await prisma.triage.findUnique({ where: { id: req.params.id } })
+  const t = await db(req.ctx).triage.findUnique({ where: { id: req.params.id } })
   if (!t) throw new HttpError(404, 'Triage not found.')
   const isOwner = req.auth.role === 'user' && t.userId === req.auth.id
   const isClinician = req.auth.role === 'professional' && t.clinicianId === req.auth.id
@@ -411,13 +427,13 @@ async function loadParticipantTriage(req) {
 triageRouter.get('/:id/messages', requireAuth, requireRole('user', 'professional'), wrap(async (req, res) => {
   const t = await loadParticipantTriage(req)
 
-  const messages = await prisma.message.findMany({
+  const messages = await db(req.ctx).message.findMany({
     where: { triageId: t.id },
     orderBy: { createdAt: 'asc' },
   })
 
   const incoming = req.auth.role === 'user' ? 'professional' : 'user'
-  await prisma.message.updateMany({
+  await db(req.ctx).message.updateMany({
     where: { triageId: t.id, senderRole: incoming, readAt: null },
     data: { readAt: new Date() },
   })
@@ -439,7 +455,7 @@ triageRouter.post('/:id/messages', requireAuth, requireRole('user', 'professiona
     throw new HttpError(409, 'This triage chat is closed.', 'TRIAGE_CLOSED')
   }
 
-  const message = await prisma.message.create({
+  const message = await db(req.ctx).message.create({
     data: {
       userId: t.userId,
       professionalId: t.clinicianId,
@@ -451,7 +467,7 @@ triageRouter.post('/:id/messages', requireAuth, requireRole('user', 'professiona
 
   // The clinician's first reply starts the triage.
   if (req.auth.role === 'professional' && t.status === 'QUEUED') {
-    await prisma.triage.updateMany({
+    await db(req.ctx).triage.updateMany({
       where: { id: t.id, status: 'QUEUED' },
       data: { status: 'IN_PROGRESS', startedAt: new Date() },
     })
@@ -489,18 +505,19 @@ triageRouter.post('/:id/complete', requireAuth, requireRole('professional'), req
   const parsed = completeSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  const triage = await prisma.triage.findUnique({ where: { id: req.params.id } })
+  const triage = await db(req.ctx).triage.findUnique({ where: { id: req.params.id } })
   if (!triage || triage.clinicianId !== req.auth.id) throw new HttpError(404, 'Triage not found.')
   if (triage.status === 'COMPLETED') throw new HttpError(409, 'This triage is already completed.')
   if (triage.status !== 'QUEUED' && triage.status !== 'IN_PROGRESS') {
     throw new HttpError(409, 'This triage cannot be completed in its current state.')
   }
 
-  const row = await getPriceRow('TRIAGE')
+  // A workspace's clinicians are paid by their institution, not by Mindora.
+  const row = req.ctx.orgId ? null : await getPriceRow('TRIAGE')
   const clinicianPayoutKes = row ? professionalPayoutKes(row.priceKes, row.payoutPercent) : 0
   const d = parsed.data
 
-  const done = await prisma.$transaction(async (tx) => {
+  const done = await db(req.ctx).$transaction(async (tx) => {
     const updated = await tx.triage.updateMany({
       where: { id: triage.id, clinicianId: req.auth.id, status: { in: ['QUEUED', 'IN_PROGRESS'] } },
       data: {

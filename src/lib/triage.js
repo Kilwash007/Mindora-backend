@@ -1,4 +1,5 @@
 import { CURRENT_AGREEMENT_VERSION } from './agreement.js'
+import { professionalScope } from './workspace.js'
 
 // ---------------------------------------------------------------------------
 // Crisis resources. Keep these identical to the numbers on the check-in
@@ -136,8 +137,9 @@ export const TRIAGE_ASSIGNMENT_MODE = process.env.TRIAGE_ASSIGNMENT === 'round_r
 
 // Round robin: the claim is a guarded update, so two triages arriving at the
 // same moment cannot both pick the same clinician. Pass a transaction client
-// to run it inside a transaction.
-export async function assignClinician(client) {
+// to run it inside a transaction. orgId is the triage's workspace (null for
+// Mindora Care): only clinicians in that same scope are ever picked.
+export async function assignClinician(client, orgId = null) {
   if (TRIAGE_ASSIGNMENT_MODE === 'broadcast') return null
 
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -149,6 +151,7 @@ export async function assignClinician(client) {
         type: { in: TRIAGE_CLINICIAN_TYPES },
         agreementVersion: CURRENT_AGREEMENT_VERSION,
         agreementAcceptedAt: { not: null },
+        ...professionalScope(orgId),
       },
       orderBy: [{ lastTriageAssignedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
       select: { id: true, lastTriageAssignedAt: true },

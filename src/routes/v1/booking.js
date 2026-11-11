@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../../lib/prisma.js'
+import { db } from '../../lib/db.js'
+import { professionalScope } from '../../lib/workspace.js'
 import { requireAuth, requireRole } from '../../middleware/auth.js'
 import { audit } from '../../lib/audit.js'
 import { wrap, HttpError } from '../../lib/wrap.js'
@@ -23,8 +25,11 @@ const SESSION_DURATION_MINUTES = 60
 
 // Works out what a patient may book, and for how much, from their latest
 // COMPLETED triage. Everything is computed here on the server.
-async function computeBookingTerms(userId) {
-  const triage = await prisma.triage.findFirst({
+//
+// Workspaces: the triage and earlier sessions are read through db(ctx), and
+// the institution covers the whole session (see the POST route below).
+async function computeBookingTerms(ctx, userId) {
+  const triage = await db(ctx).triage.findFirst({
     where: { userId, status: 'COMPLETED', careLevel: { not: null } },
     orderBy: { completedAt: 'desc' },
     include: { creditAppointment: { select: { status: true } } },
@@ -42,7 +47,7 @@ async function computeBookingTerms(userId) {
 
   let service = CARE_LEVEL_SERVICE[triage.careLevel]
   if (triage.careLevel === 'PSYCHIATRY') {
-    const priorInitial = await prisma.appointment.findFirst({
+    const priorInitial = await db(ctx).appointment.findFirst({
       where: { userId, serviceType: 'PSYCHIATRY_INITIAL', status: 'COMPLETED' },
       select: { id: true },
     })
@@ -54,7 +59,8 @@ async function computeBookingTerms(userId) {
     throw new HttpError(503, 'This service is not available right now.', 'SERVICE_UNAVAILABLE')
   }
 
-  const isStudent = await isStudentEligible(userId)
+  // Student Rate is a Mindora Care tier only.
+  const isStudent = ctx.orgId ? false : await isStudentEligible(userId)
   const listPriceKes = priceFor(row, { isStudent })
   const studentPriceApplied = isStudent && row.studentPriceKes != null
 
@@ -81,7 +87,7 @@ async function computeBookingTerms(userId) {
 // What the patient can book, the price, and the credit, before they choose
 // a professional. The app uses the public directory filtered by professionalTypes.
 bookingRouter.get('/options', requireAuth, requireRole('user'), wrap(async (req, res) => {
-  const t = await computeBookingTerms(req.auth.id)
+  const t = await computeBookingTerms(req.ctx, req.auth.id)
   res.json({ eligible: true, ...t })
 }))
 
@@ -100,10 +106,13 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
   const requestedTime = new Date(scheduledFor)
   if (requestedTime < new Date()) throw new HttpError(400, 'Appointment time must be in the future.')
 
-  const terms = await computeBookingTerms(userId)
+  const terms = await computeBookingTerms(req.ctx, userId)
+  const inWorkspace = Boolean(req.ctx.orgId)
 
+  // Only a professional in the patient's own scope can be booked: a
+  // workspace's own clinicians, or Mindora Care's professionals.
   const professional = await prisma.professional.findFirst({
-    where: { id: professionalId, verified: true, deletedAt: null },
+    where: { id: professionalId, verified: true, deletedAt: null, ...professionalScope(req.ctx.orgId) },
   })
   if (!professional) throw new HttpError(404, 'Professional not found.')
   if (!terms.professionalTypes.includes(professional.type)) {
@@ -121,6 +130,7 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
   // session length of each other. Cancelled appointments free the slot.
   const windowStart = new Date(requestedTime.getTime() - SESSION_DURATION_MINUTES * 60 * 1000)
   const windowEnd = new Date(requestedTime.getTime() + SESSION_DURATION_MINUTES * 60 * 1000)
+  // Checked across every scope: a clinician's calendar is one calendar.
   const conflict = await prisma.appointment.findFirst({
     where: {
       professionalId,
@@ -135,7 +145,8 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
   // Institution sponsorship, as before: only an ACTIVE institution with
   // coverage, and only while the member has sponsored sessions left. Here
   // the coverage applies to the balance AFTER the triage credit.
-  const user = await prisma.user.findUnique({ where: { id: userId }, include: { institution: true } })
+  // (Mindora Care programmes only. A workspace is covered below instead.)
+  const user = inWorkspace ? null : await prisma.user.findUnique({ where: { id: userId }, include: { institution: true } })
   const institution = user?.institution
   let sponsorshipAvailable = false
   // A programme that asks for student proof only covers people whose proof is approved.
@@ -152,15 +163,21 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
   }
 
   const feeKes = terms.balanceKes
-  const institutionCoveredKes = sponsorshipAvailable
-    ? Math.min(feeKes, Math.round((feeKes * institution.coveragePercent) / 100))
-    : 0
+  // A workspace session is covered in full by the institution (it is billed
+  // through monthly usage), so the patient never gets an M-Pesa prompt.
+  const institutionCoveredKes = inWorkspace
+    ? feeKes
+    : sponsorshipAvailable
+      ? Math.min(feeKes, Math.round((feeKes * institution.coveragePercent) / 100))
+      : 0
   const amountDueKes = feeKes - institutionCoveredKes
 
   // Professional payout. Corporate/EAP sponsorships keep the existing
   // exemption (no platform commission, Mindora earns a retainer instead).
   // Everything else pays the professional their percentage of the price.
-  const commissionExempt = sponsorshipAvailable && !commissionApplies(institution.type)
+  // A workspace's clinicians are paid by their institution, not by Mindora,
+  // so no platform fee is recorded on the session.
+  const commissionExempt = inWorkspace || (sponsorshipAvailable && !commissionApplies(institution.type))
   const payoutKes = commissionExempt
     ? feeKes
     : professionalPayoutKes(PAYOUT_ON_FULL_PRICE ? terms.listPriceKes : feeKes, terms.payoutPercent)
@@ -168,7 +185,7 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
 
   let appointment
   try {
-    appointment = await prisma.$transaction(async (tx) => {
+    appointment = await db(req.ctx).$transaction(async (tx) => {
       const created = await tx.appointment.create({
         data: {
           userId,
@@ -230,6 +247,7 @@ bookingRouter.post('/', requireAuth, requireRole('user'), wrap(async (req, res) 
       amountDueKes,
       platformFeeKes,
     },
+    organizationId: req.ctx.orgId,
   })
 
   // Pay the balance with POST /api/payments/initiate { appointmentId, phoneNumber }.

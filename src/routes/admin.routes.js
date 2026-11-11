@@ -1,11 +1,23 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
+import { db } from '../lib/db.js'
+import { professionalScope, userScope } from '../lib/workspace.js'
 import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { stripSecrets } from '../lib/safeSelects.js'
 
 export const adminRouter = Router()
+
+// Workspaces (Mindora for Institutions): these pages are Mindora Care's.
+// Mindora's admins act in Mindora Care (req.ctx.orgId is always empty for
+// them), so every tenant query goes through db(req.ctx), and patient and
+// professional lists use userScope / professionalScope, which leave out
+// everyone who belongs to an institution's workspace. A workspace's people
+// and records are its institution's; Mindora sees workspaces only through
+// the Organizations pages (usage totals, never records).
+const CARE = userScope(null)
+const CARE_PROS = professionalScope(null)
 
 adminRouter.get(
   '/overview',
@@ -14,10 +26,10 @@ adminRouter.get(
   async (req, res) => {
     const [totalUsers, assessmentsCompleted, referralsMade, professionalsOnNetwork] =
       await Promise.all([
-        prisma.user.count(),
-        prisma.checkIn.count(),
-        prisma.referral.count(),
-        prisma.professional.count({ where: { verified: true } }),
+        prisma.user.count({ where: CARE }),
+        db(req.ctx).checkIn.count(),
+        db(req.ctx).referral.count(),
+        prisma.professional.count({ where: { verified: true, ...CARE_PROS } }),
       ])
 
     await audit({
@@ -36,7 +48,7 @@ adminRouter.get(
   requireAuth,
   requireAdminRole('PLATFORM_ADMIN', 'CLINICAL_SAFETY_REVIEWER'),
   async (req, res) => {
-    const riskCounts = await prisma.checkIn.groupBy({
+    const riskCounts = await db(req.ctx).checkIn.groupBy({
       by: ['riskLevel'],
       _count: { riskLevel: true },
     })
@@ -46,7 +58,7 @@ adminRouter.get(
       counts[r.riskLevel] = r._count.riskLevel
     })
 
-    const alerts = await prisma.safetyAlert.findMany({
+    const alerts = await db(req.ctx).safetyAlert.findMany({
       where: { resolvedAt: null },
       orderBy: { createdAt: 'desc' },
       take: 20,
@@ -78,10 +90,10 @@ adminRouter.patch(
   requireAuth,
   requireAdminRole('PLATFORM_ADMIN', 'CLINICAL_SAFETY_REVIEWER'),
   async (req, res) => {
-    const alert = await prisma.safetyAlert.findUnique({ where: { id: req.params.id } })
+    const alert = await db(req.ctx).safetyAlert.findUnique({ where: { id: req.params.id } })
     if (!alert) return res.status(404).json({ error: 'Alert not found.' })
 
-    const updated = await prisma.safetyAlert.update({
+    const updated = await db(req.ctx).safetyAlert.update({
       where: { id: req.params.id },
       data: { resolvedAt: new Date() },
     })
@@ -104,14 +116,15 @@ adminRouter.get(
   requireAdminRole('PLATFORM_ADMIN', 'SUPPORT'),
   async (req, res) => {
     const users = await prisma.user.findMany({
+      where: CARE,
       orderBy: { createdAt: 'desc' },
     })
 
     const withLatestRisk = await Promise.all(
       users.map(async (u) => {
         const [latestCheckIn, checkInCount] = await Promise.all([
-          prisma.checkIn.findFirst({ where: { userId: u.id }, orderBy: { completedAt: 'desc' } }),
-          prisma.checkIn.count({ where: { userId: u.id } }),
+          db(req.ctx).checkIn.findFirst({ where: { userId: u.id }, orderBy: { completedAt: 'desc' } }),
+          db(req.ctx).checkIn.count({ where: { userId: u.id } }),
         ])
         return {
           id: u.id,
@@ -140,7 +153,7 @@ adminRouter.get(
   requireAuth,
   requireAdminRole('PLATFORM_ADMIN', 'SUPPORT'),
   async (req, res) => {
-    const appointments = await prisma.appointment.findMany({
+    const appointments = await db(req.ctx).appointment.findMany({
       include: { user: true, professional: true },
       orderBy: { scheduledFor: 'desc' },
       take: 100,
@@ -177,6 +190,7 @@ adminRouter.get(
   requireAdminRole('PLATFORM_ADMIN', 'CLINICAL_SAFETY_REVIEWER'),
   async (req, res) => {
     const professionals = await prisma.professional.findMany({
+      where: CARE_PROS,
       orderBy: { createdAt: 'desc' },
     })
 
@@ -201,7 +215,9 @@ adminRouter.patch(
     const parsed = verifySchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-    const professional = await prisma.professional.findUnique({ where: { id: req.params.id } })
+    // A workspace's clinicians are vouched for by their institution, so
+    // Mindora's verification switch only applies to Mindora Care's.
+    const professional = await prisma.professional.findFirst({ where: { id: req.params.id, ...CARE_PROS } })
     if (!professional) return res.status(404).json({ error: 'Professional not found.' })
 
     const updated = await prisma.professional.update({
@@ -226,7 +242,7 @@ adminRouter.get(
   requireAuth,
   requireAdminRole('PLATFORM_ADMIN', 'CLINICAL_SAFETY_REVIEWER'),
   async (req, res) => {
-    const referrals = await prisma.referral.findMany({
+    const referrals = await db(req.ctx).referral.findMany({
       include: { checkIn: true, professional: true, flags: true },
       orderBy: { createdAt: 'desc' },
       take: 100,
@@ -270,21 +286,21 @@ adminRouter.get(
       verifiedProfessionals,
       allAppointments,
     ] = await Promise.all([
-      prisma.checkIn.findMany({
+      db(req.ctx).checkIn.findMany({
         where: { completedAt: { gte: fourteenDaysAgo } },
         select: { completedAt: true },
       }),
-      prisma.checkIn.groupBy({ by: ['riskLevel'], _count: { riskLevel: true } }),
-      prisma.referral.groupBy({ by: ['status'], _count: { status: true } }),
-      prisma.appointment.groupBy({ by: ['status'], _count: { status: true } }),
-      prisma.professional.count(),
-      prisma.professional.count({ where: { verified: true } }),
+      db(req.ctx).checkIn.groupBy({ by: ['riskLevel'], _count: { riskLevel: true } }),
+      db(req.ctx).referral.groupBy({ by: ['status'], _count: { status: true } }),
+      db(req.ctx).appointment.groupBy({ by: ['status'], _count: { status: true } }),
+      prisma.professional.count({ where: CARE_PROS }),
+      prisma.professional.count({ where: { verified: true, ...CARE_PROS } }),
       // Pulled once, broken down in JS below — a booking's "tier" isn't a
       // stored column, it's derived from whether an institution sponsored
       // it and how much: 100% covered reads as the corporate/EAP tier,
       // partially covered reads as the student/discount tier, and anything
       // with no institution at all is the standard self-pay tier.
-      prisma.appointment.findMany({
+      db(req.ctx).appointment.findMany({
         select: { feeKes: true, institutionCoveredKes: true, sponsoringInstitutionId: true },
       }),
     ])

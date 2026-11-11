@@ -2,6 +2,7 @@ import { prisma } from './prisma.js'
 import { sendTriageQueuedEmail } from './email.js'
 import { TRIAGE_CLINICIAN_TYPES } from './triage.js'
 import { CURRENT_AGREEMENT_VERSION } from './agreement.js'
+import { professionalScope } from './workspace.js'
 
 // Who should be told that a triage is waiting.
 //   - If a clinician is assigned, only that clinician.
@@ -11,6 +12,8 @@ import { CURRENT_AGREEMENT_VERSION } from './agreement.js'
 //     patient never waits unseen.
 // Nothing is returned for a triage that is not waiting in the queue. The
 // notices carry no patient details; the email only says a triage is waiting.
+// Only clinicians in the triage's own scope are ever told: a workspace's
+// triage goes to that workspace's clinicians, Mindora Care's to Mindora's.
 export async function buildTriageNotices(triageId, client = prisma) {
   const triage = await client.triage.findUnique({
     where: { id: triageId },
@@ -18,6 +21,7 @@ export async function buildTriageNotices(triageId, client = prisma) {
       status: true,
       isFree: true,
       urgency: true,
+      organizationId: true,
       clinician: { select: { email: true, fullName: true, deletedAt: true } },
     },
   })
@@ -35,6 +39,7 @@ export async function buildTriageNotices(triageId, client = prisma) {
     type: { in: TRIAGE_CLINICIAN_TYPES },
     agreementVersion: CURRENT_AGREEMENT_VERSION,
     agreementAcceptedAt: { not: null },
+    ...professionalScope(triage.organizationId),
   }
 
   const onCall = await client.professional.findMany({

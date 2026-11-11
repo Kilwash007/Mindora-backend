@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import { prisma } from '../../lib/prisma.js'
+import { db } from '../../lib/db.js'
+import { professionalScope } from '../../lib/workspace.js'
 import { requireAuth, requireAdminRole } from '../../middleware/auth.js'
 import { audit } from '../../lib/audit.js'
 import { wrap } from '../../lib/wrap.js'
@@ -14,6 +16,10 @@ const DAY_MS = 24 * 60 * 60 * 1000
 // after a slot was released. It deliberately has NO patient names, emails or
 // clinical detail: a triage is a health record, and an operations view does
 // not need to read it. Patient ids appear only where money needs sorting out.
+//
+// It covers Mindora Care only: Mindora's admins act in Mindora Care, so
+// db(req.ctx) and professionalScope leave every workspace's triage and
+// clinicians out. A workspace's queue is its institution's business.
 adminTriageRouter.get(
   '/',
   requireAuth,
@@ -24,17 +30,23 @@ adminTriageRouter.get(
     const [onCall, awaitingPayment, queued, inProgress, completedLastWeek, unassigned, escalated, waiting, latePaid] =
       await Promise.all([
         prisma.professional.findMany({
-          where: { onCallForTriage: true, verified: true, deletedAt: null, type: { in: TRIAGE_CLINICIAN_TYPES } },
+          where: {
+            onCallForTriage: true,
+            verified: true,
+            deletedAt: null,
+            type: { in: TRIAGE_CLINICIAN_TYPES },
+            ...professionalScope(req.ctx.orgId),
+          },
           select: { id: true, fullName: true, type: true },
           orderBy: { fullName: 'asc' },
         }),
-        prisma.triage.count({ where: { status: 'AWAITING_PAYMENT' } }),
-        prisma.triage.count({ where: { status: 'QUEUED' } }),
-        prisma.triage.count({ where: { status: 'IN_PROGRESS' } }),
-        prisma.triage.count({ where: { status: 'COMPLETED', completedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } } }),
-        prisma.triage.count({ where: { status: 'QUEUED', clinicianId: null } }),
-        prisma.triage.count({ where: { status: 'QUEUED', escalatedAt: { not: null } } }),
-        prisma.triage.findMany({
+        db(req.ctx).triage.count({ where: { status: 'AWAITING_PAYMENT' } }),
+        db(req.ctx).triage.count({ where: { status: 'QUEUED' } }),
+        db(req.ctx).triage.count({ where: { status: 'IN_PROGRESS' } }),
+        db(req.ctx).triage.count({ where: { status: 'COMPLETED', completedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } } }),
+        db(req.ctx).triage.count({ where: { status: 'QUEUED', clinicianId: null } }),
+        db(req.ctx).triage.count({ where: { status: 'QUEUED', escalatedAt: { not: null } } }),
+        db(req.ctx).triage.findMany({
           where: { status: 'QUEUED' },
           orderBy: { createdAt: 'asc' },
           take: 50,
@@ -50,7 +62,7 @@ adminTriageRouter.get(
             payment: { select: { paidAt: true } },
           },
         }),
-        prisma.payment.findMany({
+        db(req.ctx).payment.findMany({
           where: {
             status: 'PAID',
             paidAt: { gte: new Date(now.getTime() - 30 * DAY_MS) },
