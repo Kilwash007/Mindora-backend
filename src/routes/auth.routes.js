@@ -17,6 +17,7 @@ import { requireAuth } from '../middleware/auth.js'
 import { CURRENT_CONSENT_VERSION } from '../lib/consent.js'
 import { PROFESSIONAL_TYPES } from '../lib/professionalTypes.js'
 import { findEnrollableInstitution } from '../lib/enroll.js'
+import { dateOfBirthField, dobToDate, isUnder18, UNDER_18_SIGNUP } from '../lib/age.js'
 
 export const authRouter = Router()
 
@@ -32,6 +33,9 @@ const userRegisterSchema = registerSchema.extend({
   consent: z.literal(true, {
     errorMap: () => ({ message: 'You must accept the privacy consent to create an account.' }),
   }),
+  // Required: Mindora is for adults only. Under 18 is refused before
+  // anything is stored (see lib/age.js).
+  dateOfBirth: dateOfBirthField,
   // An optional pilot or promo code that links the new account to its programme.
   enrollmentCode: z.string().trim().max(40).optional(),
 })
@@ -70,7 +74,11 @@ authRouter.post('/user/register', registerLimiter, async (req, res) => {
   const parsed = userRegisterSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  const { fullName, email, password, enrollmentCode } = parsed.data
+  const { fullName, email, password, dateOfBirth, enrollmentCode } = parsed.data
+
+  // Checked first, so nothing about an under-18 person is looked up or saved.
+  if (isUnder18(dateOfBirth)) return res.status(403).json(UNDER_18_SIGNUP)
+
   const existing = await prisma.user.findUnique({ where: { email } })
   if (existing) return res.status(409).json({ error: 'An account with this email already exists.' })
 
@@ -90,6 +98,7 @@ authRouter.post('/user/register', registerLimiter, async (req, res) => {
       passwordHash: await hashPassword(password),
       consentAcceptedAt: new Date(),
       consentVersion: CURRENT_CONSENT_VERSION,
+      dateOfBirth: dobToDate(dateOfBirth),
       institutionId: institution?.id ?? null,
     },
   })

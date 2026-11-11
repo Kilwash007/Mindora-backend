@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { hasUsedCoveredTriage } from '../lib/sponsorship.js'
+import { countSeatsUsed, seatsFull } from '../lib/enroll.js'
 
 export const accountRouter = Router()
 
@@ -144,6 +145,8 @@ const enrollSchema = z.object({ enrollmentCode: z.string().min(1) })
 // needed per-enrollment (the institution's own ACTIVE status is the gate).
 // If the institution has a memberLimit (for example, 50 pilot places), new
 // links are refused once it is reached; people already linked are unaffected.
+// Places are counted as in lib/enroll.js: for a programme that asks for
+// student proof, only members whose proof has been approved take a place.
 accountRouter.post('/enroll', requireAuth, requireRole('user'), async (req, res) => {
   const parsed = enrollSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -160,8 +163,8 @@ accountRouter.post('/enroll', requireAuth, requireRole('user'), async (req, res)
   const alreadyLinked = user?.institutionId === institution.id
 
   if (!alreadyLinked && institution.memberLimit != null) {
-    const memberCount = await prisma.user.count({ where: { institutionId: institution.id } })
-    if (memberCount >= institution.memberLimit) {
+    const used = await countSeatsUsed(institution)
+    if (seatsFull(institution, used)) {
       return res.status(409).json({
         error:
           "All the free places in this programme have been taken. You can still complete free wellbeing check-ins and book sessions at your usual rate.",

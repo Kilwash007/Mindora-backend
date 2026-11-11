@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
+import { countSeatsUsed } from '../lib/enroll.js'
 
 export const institutionRouter = Router()
 
@@ -108,8 +109,12 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
   const institution = await prisma.institution.findUnique({ where: { id: req.params.id } })
   if (!institution) return res.status(404).json({ error: 'Institution not found.' })
 
-  const [memberCount, sponsoredAppointmentCount, coverageSum] = await Promise.all([
+  // memberCount is everyone linked to the code. seatsUsed is how many
+  // pilot places are taken: for a programme that asks for student proof,
+  // only members whose proof has been approved (see lib/enroll.js).
+  const [memberCount, seatsUsed, sponsoredAppointmentCount, coverageSum] = await Promise.all([
     prisma.user.count({ where: { institutionId: institution.id } }),
+    countSeatsUsed(institution),
     prisma.appointment.count({
       where: { sponsoringInstitutionId: institution.id, status: { not: 'CANCELLED' } },
     }),
@@ -133,9 +138,11 @@ institutionRouter.get('/:id/stats', requireAuth, requireAdminRole('PLATFORM_ADMI
 
   res.json({
     memberCount,
+    seatsUsed,
+    awaitingProofCount: institution.requiresStudentProof ? Math.max(0, memberCount - seatsUsed) : 0,
     memberLimit: institution.memberLimit,
     placesRemaining:
-      institution.memberLimit == null ? null : Math.max(0, institution.memberLimit - memberCount),
+      institution.memberLimit == null ? null : Math.max(0, institution.memberLimit - seatsUsed),
     sponsoredSessionsPerMember: institution.sponsoredSessionsPerMember,
     sponsoredAppointmentCount,
     sponsoredTriageCount,

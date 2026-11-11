@@ -7,6 +7,7 @@ import { prisma } from '../lib/prisma.js'
 import { requireAuth, requireRole, requireAdminRole } from '../middleware/auth.js'
 import { audit } from '../lib/audit.js'
 import { notifyProofDecision } from '../lib/proofReview.js'
+import { countSeatsUsed, seatsFull } from '../lib/enroll.js'
 
 export const studentRateRouter = Router()
 
@@ -161,13 +162,60 @@ studentRateRouter.patch('/verifications/:id/review', requireAuth, requireAdminRo
   const verification = await prisma.studentRateVerification.findUnique({ where: { id: req.params.id } })
   if (!verification) return res.status(404).json({ error: 'Verification not found.' })
 
-  const updated = await prisma.studentRateVerification.update({
-    where: { id: req.params.id },
-    data: { status: parsed.data.status, reviewNotes: parsed.data.reviewNotes, reviewedAt: new Date() },
-  })
+  const reviewData = { status: parsed.data.status, reviewNotes: parsed.data.reviewNotes, reviewedAt: new Date() }
+  let updated
 
   if (parsed.data.status === 'APPROVED') {
-    await prisma.user.update({ where: { id: verification.userId }, data: { studentRateEligible: true } })
+    // Approving proof is what takes a pilot place (lib/enroll.js). If the
+    // person's programme asks for proof and is already full, the approval
+    // is refused so the limit is never passed; the admin can raise the
+    // limit on the Institutions page or reject with a note. The count and
+    // the approval run in one serializable transaction, so two approvals at
+    // the same moment can't both take the last place.
+    let outcome
+    try {
+      outcome = await prisma.$transaction(
+        async (tx) => {
+          const user = await tx.user.findUnique({
+            where: { id: verification.userId },
+            select: {
+              studentRateEligible: true,
+              institution: { select: { id: true, name: true, memberLimit: true, requiresStudentProof: true } },
+            },
+          })
+          if (!user) return { missing: true }
+
+          const programme = user.institution
+          if (!user.studentRateEligible && programme?.requiresStudentProof && programme.memberLimit != null) {
+            const used = await countSeatsUsed(programme, tx)
+            if (seatsFull(programme, used)) return { full: { name: programme.name, used, limit: programme.memberLimit } }
+          }
+
+          const saved = await tx.studentRateVerification.update({ where: { id: req.params.id }, data: reviewData })
+          await tx.user.update({ where: { id: verification.userId }, data: { studentRateEligible: true } })
+          return { saved }
+        },
+        { isolationLevel: 'Serializable' }
+      )
+    } catch (err) {
+      // P2034: another review changed the same rows at the same moment.
+      if (err?.code === 'P2034') {
+        return res.status(409).json({ error: 'Another review was saved at the same moment. Please try again.' })
+      }
+      throw err
+    }
+
+    if (outcome.missing) return res.status(404).json({ error: 'The account for this request no longer exists.' })
+    if (outcome.full) {
+      const { name, used, limit } = outcome.full
+      return res.status(409).json({
+        error: `${name} has no places left (${used} of ${limit} taken). Raise its limit on the Institutions page, or reject this request with a note.`,
+        code: 'PROGRAMME_FULL',
+      })
+    }
+    updated = outcome.saved
+  } else {
+    updated = await prisma.studentRateVerification.update({ where: { id: req.params.id }, data: reviewData })
   }
 
   // Tell the person what was decided. Never blocks or undoes the review.

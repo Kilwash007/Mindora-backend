@@ -6,6 +6,7 @@ import { audit } from '../../lib/audit.js'
 import { wrap, HttpError } from '../../lib/wrap.js'
 import { normalizeKenyanPhone } from '../../lib/mpesa.js'
 import { registrationComplete } from '../../lib/triage.js'
+import { dateOfBirthField, dobToDate, isUnder18, UNDER_18_ACCOUNT } from '../../lib/age.js'
 
 export const meRouter = Router()
 
@@ -42,14 +43,7 @@ const kenyanPhone = z
 
 const registrationSchema = z.object({
   phone: kenyanPhone.optional(),
-  dateOfBirth: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the format YYYY-MM-DD.')
-    .refine((v) => {
-      const d = new Date(`${v}T00:00:00Z`)
-      return !Number.isNaN(d.getTime()) && d < new Date() && d.getUTCFullYear() >= 1900
-    }, 'Please enter a valid date of birth.')
-    .optional(),
+  dateOfBirth: dateOfBirthField.optional(),
   sex: z.enum(['FEMALE', 'MALE', 'INTERSEX', 'PREFER_NOT_TO_SAY']).optional(),
   county: z.string().trim().min(2).max(60).optional(),
   nationalIdNumber: z
@@ -70,7 +64,37 @@ meRouter.patch('/registration', requireAuth, requireRole('user'), wrap(async (re
 
   const { dateOfBirth, ...rest } = parsed.data
   const data = { ...rest }
-  if (dateOfBirth) data.dateOfBirth = new Date(`${dateOfBirth}T00:00:00Z`)
+
+  if (dateOfBirth) {
+    const current = await prisma.user.findUnique({ where: { id: req.auth.id }, select: { dateOfBirth: true } })
+    if (!current) throw new HttpError(404, 'Account not found.')
+    const saved = current.dateOfBirth ? current.dateOfBirth.toISOString().slice(0, 10) : null
+
+    // Once saved, the date of birth can't be changed here (the form sends it
+    // back unchanged with every save, which is fine). This stops an age
+    // check being got round by editing it afterwards.
+    if (saved && saved !== dateOfBirth) {
+      return res.status(409).json({
+        error: 'Your date of birth is already saved. To correct it, contact Mindora support.',
+        code: 'DOB_LOCKED',
+      })
+    }
+
+    // Accounts made before date of birth was asked at sign-up give it here,
+    // at triage. Under 18 stops here and nothing is saved.
+    if (isUnder18(dateOfBirth)) {
+      await audit({
+        actorType: 'user',
+        actorId: req.auth.id,
+        action: 'registration.under_18_blocked',
+        resourceType: 'user',
+        resourceId: req.auth.id,
+      })
+      return res.status(403).json(UNDER_18_ACCOUNT)
+    }
+
+    if (!saved) data.dateOfBirth = dobToDate(dateOfBirth)
+  }
 
   const user = await prisma.user.update({
     where: { id: req.auth.id },
