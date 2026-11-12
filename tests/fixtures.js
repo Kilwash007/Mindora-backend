@@ -160,6 +160,24 @@ async function buildScope(key) {
   ]
   const markers = [tag, ...ids, triageCheckIn.id, organizationId, orgAdmin?.id].filter(Boolean)
 
+  // Mindora's Organizations pages may show a workspace's name, id and member
+  // totals, but never its people or records. These are what must never
+  // appear there.
+  const recordMarkers = [
+    ...ids,
+    triageCheckIn.id,
+    `Patient ${tag}`,
+    `Clinician ${tag}`,
+    `Bio ${tag}`,
+    `Reason ${tag}`,
+    `Note ${tag}`,
+    `Message ${tag}`,
+    `Triage ${tag}`,
+    `Alert ${tag}`,
+    `Payment ${tag}`,
+    `LIC-${tag}`,
+  ]
+
   return {
     key,
     tag,
@@ -167,6 +185,7 @@ async function buildScope(key) {
     actors,
     ids,
     markers,
+    recordMarkers,
     patientId: patient.id,
     clinicianId: clinician.id,
     triageId: triage.id,

@@ -209,3 +209,43 @@ export async function sendProofReviewedEmail(to, { name, approved, programme, fr
     `,
   })
 }
+
+// An invitation to join an institution's workspace (Mindora for
+// Institutions). Says who invited them and to what, and carries the one-time
+// link; nothing about anyone's health. The link is only ever in this email
+// (or wherever the inviting admin chose to copy it): only its hash is stored.
+// EMAIL_DISABLED=true skips sending (used by local tests).
+const INVITE_ROLE_COPY = {
+  ORG_OWNER: { title: 'run', what: "as an owner of the organisation's Mindora workspace" },
+  ORG_ADMIN: { title: 'help run', what: "as an administrator of the organisation's Mindora workspace" },
+  ORG_CLINICIAN: { title: 'join', what: 'as a clinician, to see the patients the organisation looks after through Mindora' },
+  ORG_PATIENT: { title: 'join', what: 'to use the mental health support the organisation provides through Mindora' },
+}
+
+export async function sendInviteEmail(to, { organizationName, role, url, expiresAt }) {
+  if (process.env.EMAIL_DISABLED === 'true') return
+
+  const copy = INVITE_ROLE_COPY[role]
+  if (!copy) throw new Error(`Unknown invite role: ${role}`)
+  const until = new Date(expiresAt).toLocaleString('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
+  const org = escapeHtml(organizationName)
+
+  await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject: `You're invited to ${copy.title} ${organizationName} on Mindora`,
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px;">
+        <h2 style="color: #0f1e3d;">You're invited to ${org} on Mindora</h2>
+        <p>${org} has invited you to Mindora ${copy.what}.</p>
+        <p><a href="${escapeHtml(url)}" style="display: inline-block; background: #0f1e3d; color: #ffffff; padding: 10px 18px; border-radius: 8px; text-decoration: none;">Accept the invitation</a></p>
+        <p style="color: #565d70; font-size: 13px;">This link works once and expires on ${until}. If you weren't expecting it, you can ignore this email.</p>
+      </div>
+    `,
+  })
+}

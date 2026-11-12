@@ -27,6 +27,9 @@ import { groupRouter } from './routes/group.routes.js'
 import { paymentRouter } from './routes/payment.routes.js'
 import { studentRateRouter } from './routes/studentRate.routes.js'
 import { v1Router } from './routes/v1/index.js'
+import { organizationAdminRouter } from './routes/organization.routes.js'
+import { orgRouter } from './routes/org.routes.js'
+import { inviteRouter } from './routes/invite.routes.js'
 import { kcbIpnRouter } from './routes/kcbIpn.routes.js'
 
 // Cloudflare's published edge ranges (https://www.cloudflare.com/ips/,
@@ -114,6 +117,11 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', env: process.env.NODE
 app.use('/api/auth', authRouter)
 app.use('/api/referrals', referralRouter)
 app.use('/api/check-ins', checkInRouter)
+// Mindora for Institutions: Mindora's workspace pages (platform admins),
+// an institution's own administration, and accepting an invitation.
+app.use('/api/admin/organizations', organizationAdminRouter)
+app.use('/api/org', orgRouter)
+app.use('/api/invites', inviteRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/professionals', professionalRouter)
 app.use('/api/appointments', appointmentRouter)

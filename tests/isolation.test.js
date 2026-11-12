@@ -18,7 +18,10 @@ import { getRoutes, paramsOf, fill } from './routes.js'
 //   - routes with parameters (/:id, /:userId ...): each is called with every
 //     id from the other scopes, and must not return that scope's data.
 // Mindora admins act in Mindora Care, so workspaces A and B are foreign to
-// them. Each failure names the route and what leaked.
+// them. The one exception is Mindora's Organizations pages
+// (/api/admin/organizations), which by design show each workspace's name and
+// member totals: there, only the workspace's people and records count as a
+// leak. Each failure names the route and what leaked.
 //
 // ISOLATION_REPORT=<path> also writes the full list of leaks to that file.
 
@@ -45,10 +48,12 @@ async function get(path, token) {
   return { status: res.status, text }
 }
 
-function leaksIn(text, foreignScopes) {
+const PLATFORM_VIEW = /^\/api\/admin\/organizations(\/|$)/
+
+function leaksIn(text, foreignScopes, platformView = false) {
   const found = []
   for (const scope of foreignScopes) {
-    for (const marker of scope.markers) {
+    for (const marker of platformView ? scope.recordMarkers : scope.markers) {
       if (text.includes(marker)) {
         found.push(`${scope.key === 'care' ? 'Mindora Care' : `workspace ${scope.key}`} data`)
         break
@@ -58,24 +63,25 @@ function leaksIn(text, foreignScopes) {
   return found
 }
 
-async function sweep(actorLabel, token, ownKey) {
+async function sweep(actorLabel, token, ownKey, isMindoraAdmin = false) {
   const foreign = Object.values(world.scopes).filter((s) => s.key !== ownKey)
   const foreignIds = foreign.flatMap((s) => s.ids)
   const leaks = []
 
   for (const path of routes) {
     const params = paramsOf(path)
+    const platformView = isMindoraAdmin && PLATFORM_VIEW.test(path)
     if (params.length === 0) {
       const { status, text } = await get(path, token)
       if (status < 400) {
-        for (const what of leaksIn(text, foreign)) leaks.push({ actor: actorLabel, route: `GET ${path}`, status, what })
+        for (const what of leaksIn(text, foreign, platformView)) leaks.push({ actor: actorLabel, route: `GET ${path}`, status, what })
       }
       continue
     }
     for (const id of foreignIds) {
       const { status, text } = await get(fill(path, id), token)
       if (status >= 400) continue
-      const found = leaksIn(text, foreign)
+      const found = leaksIn(text, foreign, platformView)
       if (found.length) {
         leaks.push({ actor: actorLabel, route: `GET ${path}`, status, what: found.join(', ') })
         break
@@ -123,7 +129,7 @@ const ACTORS = [
 for (const [label, scopeKey, role] of ACTORS) {
   test(`${label} sees nothing from other workspaces`, async () => {
     const token = role === 'admin' ? world.mindoraAdmin : world.scopes[scopeKey].actors[role]
-    const leaks = await sweep(label, token, scopeKey)
+    const leaks = await sweep(label, token, scopeKey, role === 'admin')
     allLeaks.push(...leaks)
     assert.equal(leaks.length, 0, `${label} can see other workspaces' data:\n${describe(leaks)}`)
   })

@@ -20,6 +20,8 @@ process.env.JWT_SECRET = 'mindora-test-secret-not-for-production'
 // email library refuses to start with no key at all, so it gets a fake one:
 // any email a test triggered would be rejected by Resend, never delivered.
 process.env.RESEND_API_KEY = 're_test_fake_key_never_sends'
+// The email helpers that check this skip sending entirely.
+process.env.EMAIL_DISABLED = 'true'
 for (const key of ['ANTHROPIC_API_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) {
   process.env[key] = ''
 }

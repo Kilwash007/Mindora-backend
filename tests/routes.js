@@ -22,11 +22,17 @@ import { triageRouter } from '../src/routes/v1/triage.js'
 import { bookingRouter } from '../src/routes/v1/booking.js'
 import { clinicianRouter } from '../src/routes/v1/clinician.js'
 import { adminTriageRouter } from '../src/routes/v1/adminTriage.js'
+import { organizationAdminRouter } from '../src/routes/organization.routes.js'
+import { orgRouter } from '../src/routes/org.routes.js'
+import { inviteRouter } from '../src/routes/invite.routes.js'
 
 // Same mount points as src/app.js. If a router is added there, add it here
 // too, so the sweep covers it.
 const MOUNTS = [
   ['/api/auth', authRouter],
+  ['/api/admin/organizations', organizationAdminRouter],
+  ['/api/org', orgRouter],
+  ['/api/invites', inviteRouter],
   ['/api/referrals', referralRouter],
   ['/api/check-ins', checkInRouter],
   ['/api/admin', adminRouter],
